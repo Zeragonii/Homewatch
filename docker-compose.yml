@@ -1,0 +1,26 @@
+services:
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: homewatch
+      POSTGRES_USER: homewatch
+      POSTGRES_PASSWORD: homewatch
+    volumes:
+      - homewatch_db:/var/lib/postgresql/data
+
+  app:
+    build: ./server
+    restart: unless-stopped
+    depends_on:
+      - db
+    env_file:
+      - .env
+    ports:
+      - "8090:8000"
+    volumes:
+      - homewatch_screenshots:/data/screenshots
+
+volumes:
+  homewatch_db:
+  homewatch_screenshots:

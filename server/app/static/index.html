@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>HomeWatch</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div id="login" class="center card">
+  <h1>HomeWatch</h1><p class="muted">Parent console</p>
+  <input id="username" placeholder="Username" value="admin"><input id="password" type="password" placeholder="Password">
+  <button onclick="login()">Sign in</button><div id="loginError" class="error"></div>
+</div>
+<div id="app" class="hidden">
+<header><div><h1>HomeWatch</h1><span class="muted">Family dashboard</span></div><button class="secondary" onclick="logout()">Sign out</button></header>
+<main>
+<section class="card"><div class="row"><div><h2>Children</h2><p class="muted">Create profiles before approving devices.</p></div><div class="row"><input id="childName" placeholder="Child name"><button onclick="addChild()">Add</button></div></div><div id="children" class="chips"></div></section>
+<section class="card"><h2>Pending devices</h2><div id="pending"></div></section>
+<section><h2>Devices</h2><div id="devices" class="grid"></div></section>
+</main>
+</div>
+<script src="/static/app.js"></script>
+</body></html>

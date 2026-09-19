@@ -1,0 +1,7 @@
+*.db
+.env
+screenshots/
+**/bin/
+**/obj/
+out/
+.vs/

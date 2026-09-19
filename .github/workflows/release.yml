@@ -1,0 +1,56 @@
+name: Build and release
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  windows-agent:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Publish agent
+        shell: pwsh
+        run: |
+          dotnet publish agent/HomeWatchAgent/HomeWatchAgent.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o out/agent
+          dotnet publish agent/HomeWatchUpdater/HomeWatchUpdater.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o out/updater
+          Copy-Item out/updater/HomeWatchUpdater.exe out/agent/HomeWatchUpdater.exe
+          # Add Authenticode signing here once a signing certificate is configured.
+          Compress-Archive -Path out/agent/* -DestinationPath HomeWatch-Agent-win-x64.zip
+          (Get-FileHash HomeWatch-Agent-win-x64.zip -Algorithm SHA256).Hash.ToLower() | Out-File -Encoding ascii HomeWatch-Agent-win-x64.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: HomeWatch-Agent-win-x64
+          path: |
+            HomeWatch-Agent-win-x64.zip
+            HomeWatch-Agent-win-x64.sha256
+      - name: Attach to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            HomeWatch-Agent-win-x64.zip
+            HomeWatch-Agent-win-x64.sha256
+
+  server-image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: ./server
+          push: true
+          tags: ghcr.io/${{ github.repository_owner }}/homewatch-server:${{ github.ref_name }}
