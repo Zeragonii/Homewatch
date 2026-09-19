@@ -28,8 +28,45 @@ function showView(view){currentView=view;document.getElementById('view-dashboard
 async function refresh(){try{const next=await api('/api/dashboard');state=next;renderSummary();renderChildren();renderPending();patchDevices();lastRefresh.textContent=`Updated ${new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'})}`;}catch(e){if(e.message==='AUTH'){appPanel.classList.add('hidden');loginPanel.classList.remove('hidden');if(refreshTimer){clearInterval(refreshTimer);refreshTimer=null}}}}
 
 function renderSummary(){const total=state.devices.length,online=state.devices.filter(d=>d.online).length,pending=state.pending.length;statTotal.textContent=total;statOnline.textContent=online;statOffline.textContent=total-online;statPending.textContent=pending;pendingCount.textContent=pending?`${pending} waiting`:'None waiting';pendingBadge.textContent=pending;pendingBadge.classList.toggle('hidden',pending===0)}
-function renderChildren(){childrenEl.innerHTML=state.children.map(c=>`<span class="chip">${esc(c.name)}</span>`).join('')||'<span class="muted">No child profiles yet.</span>'}
-function renderPending(){pendingEl.innerHTML=state.pending.map(p=>`<div class="pending"><div class="row"><div><b>${esc(p.hostname)}</b><br><span class="muted">${esc(p.os_version)} · Agent ${esc(p.agent_version)}</span></div><div class="row"><select id="child-${p.installation_id}">${state.children.map(c=>`<option value="${c.id}">${esc(c.name)}</option>`).join('')}</select><input id="name-${p.installation_id}" placeholder="Device name" value="${esc(p.hostname)}"><button onclick="approve('${p.installation_id}')">Enrol</button></div></div></div>`).join('')||'<p class="muted">No devices waiting for approval.</p>'}
+function renderChildren(){
+  const wanted=new Set(state.children.map(c=>String(c.id)));
+  childrenEl.querySelectorAll('[data-child-id]').forEach(el=>{if(!wanted.has(el.dataset.childId))el.remove()});
+  for(const c of state.children){
+    let chip=childrenEl.querySelector(`[data-child-id="${cssEscape(c.id)}"]`);
+    if(!chip){chip=document.createElement('span');chip.className='chip';chip.dataset.childId=c.id;childrenEl.appendChild(chip)}
+    chip.textContent=c.name;
+  }
+  let empty=childrenEl.querySelector('[data-empty-children]');
+  if(!state.children.length){if(!empty){empty=document.createElement('span');empty.className='muted';empty.dataset.emptyChildren='1';empty.textContent='No child profiles yet.';childrenEl.appendChild(empty)}}
+  else empty?.remove();
+}
+function renderPending(){
+  const wanted=new Set(state.pending.map(p=>String(p.installation_id)));
+  pendingEl.querySelectorAll('[data-installation-id]').forEach(el=>{if(!wanted.has(el.dataset.installationId))el.remove()});
+  for(const p of state.pending){
+    let row=pendingEl.querySelector(`[data-installation-id="${cssEscape(p.installation_id)}"]`);
+    if(!row){
+      row=document.createElement('div');row.className='pending';row.dataset.installationId=p.installation_id;
+      row.innerHTML=`<div class="row"><div><b class="pending-hostname"></b><br><span class="muted pending-meta"></span></div><div class="row"><select class="pending-child"></select><input class="pending-name" placeholder="Device name"><button class="pending-enrol">Enrol</button></div></div>`;
+      row.querySelector('.pending-name').value=p.hostname;
+      row.querySelector('.pending-enrol').addEventListener('click',()=>approve(p.installation_id));
+      pendingEl.appendChild(row);
+    }
+    row.querySelector('.pending-hostname').textContent=p.hostname;
+    row.querySelector('.pending-meta').textContent=`${p.os_version} · Agent ${p.agent_version}`;
+    const select=row.querySelector('.pending-child');
+    const selected=select.value;
+    const desiredIds=state.children.map(c=>String(c.id));
+    const existingIds=[...select.options].map(o=>o.value);
+    if(JSON.stringify(existingIds)!==JSON.stringify(desiredIds)){
+      select.replaceChildren(...state.children.map(c=>{const o=document.createElement('option');o.value=c.id;o.textContent=c.name;return o}));
+      if(desiredIds.includes(selected))select.value=selected;
+    }
+  }
+  let empty=pendingEl.querySelector('[data-empty-pending]');
+  if(!state.pending.length){if(!empty){empty=document.createElement('p');empty.className='muted';empty.dataset.emptyPending='1';empty.textContent='No devices waiting for approval.';pendingEl.appendChild(empty)}}
+  else empty?.remove();
+}
 
 function patchDevices(){const wanted=new Set(state.devices.map(d=>d.id));devicesEl.querySelectorAll('[data-device-id]').forEach(el=>{if(!wanted.has(el.dataset.deviceId))el.remove()});for(const d of state.devices){let card=devicesEl.querySelector(`[data-device-id="${cssEscape(d.id)}"]`);if(!card){card=document.createElement('article');card.className='device';card.dataset.deviceId=d.id;card.innerHTML=deviceTemplate(d);devicesEl.appendChild(card)}updateDeviceCard(card,d)}if(!state.devices.length){if(!document.getElementById('noDevices'))devicesEl.insertAdjacentHTML('beforeend','<p id="noDevices" class="muted empty-state">No enrolled devices yet. Open Onboarding to add one.</p>')}else document.getElementById('noDevices')?.remove()}
 function deviceTemplate(d){return `<div class="row"><div><h3 class="device-title"></h3><span class="device-status"></span></div><small class="muted device-agent"></small></div><p><b>Current:</b> <span class="device-current"></span></p><div class="activity"></div><div class="actions"><input class="message-input" placeholder="Message"><button onclick="sendMessage('${escAttr(d.id)}')">Send</button><button class="secondary" onclick="shot('${escAttr(d.id)}')">Screenshot</button></div><img class="screenshot hidden" alt="Latest screenshot">`}
@@ -37,7 +74,7 @@ function updateDeviceCard(card,d){card.querySelector('.device-title').textConten
 
 function fmt(sec){sec=Number(sec);if(sec<60)return sec+'s';const h=Math.floor(sec/3600),m=Math.floor((sec%3600)/60);return h?`${h}h ${m}m`:`${m}m`}
 async function addChild(){if(!childNameInput.value.trim())return;await api('/api/children',{method:'POST',body:JSON.stringify({name:childNameInput.value.trim()})});childNameInput.value='';await refresh()}
-async function approve(id){const child=Number(document.getElementById('child-'+id).value),name=document.getElementById('name-'+id).value.trim();await api('/api/pending/'+id+'/approve',{method:'POST',body:JSON.stringify({child_id:child,device_name:name})});await refresh()}
+async function approve(id){const row=pendingEl.querySelector(`[data-installation-id="${cssEscape(id)}"]`);const child=Number(row?.querySelector('.pending-child')?.value),name=row?.querySelector('.pending-name')?.value.trim();if(!row||!child||!name)return;await api('/api/pending/'+id+'/approve',{method:'POST',body:JSON.stringify({child_id:child,device_name:name})});await refresh()}
 async function sendMessage(id){const card=devicesEl.querySelector(`[data-device-id="${cssEscape(id)}"]`),el=card?.querySelector('.message-input');if(!el?.value.trim())return;await api(`/api/devices/${id}/commands`,{method:'POST',body:JSON.stringify({kind:'message',payload:el.value.trim()})});el.value=''}
 async function shot(id){const card=devicesEl.querySelector(`[data-device-id="${cssEscape(id)}"]`);await api(`/api/devices/${id}/commands`,{method:'POST',body:JSON.stringify({kind:'screenshot',payload:''})});setTimeout(()=>{const img=card?.querySelector('.screenshot');if(!img)return;img.src=`/api/devices/${id}/screenshot?t=${Date.now()}`;img.onload=()=>img.classList.remove('hidden')},2500)}
 function esc(s){return String(s??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]))}
