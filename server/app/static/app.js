@@ -69,13 +69,36 @@ function renderPending(){
 }
 
 function patchDevices(){const wanted=new Set(state.devices.map(d=>d.id));devicesEl.querySelectorAll('[data-device-id]').forEach(el=>{if(!wanted.has(el.dataset.deviceId))el.remove()});for(const d of state.devices){let card=devicesEl.querySelector(`[data-device-id="${cssEscape(d.id)}"]`);if(!card){card=document.createElement('article');card.className='device';card.dataset.deviceId=d.id;card.innerHTML=deviceTemplate(d);devicesEl.appendChild(card)}updateDeviceCard(card,d)}if(!state.devices.length){if(!document.getElementById('noDevices'))devicesEl.insertAdjacentHTML('beforeend','<p id="noDevices" class="muted empty-state">No enrolled devices yet. Open Onboarding to add one.</p>')}else document.getElementById('noDevices')?.remove()}
-function deviceTemplate(d){return `<div class="row"><div><h3 class="device-title"></h3><span class="device-status"></span></div><small class="muted device-agent"></small></div><p><b>User:</b> <span class="device-user"></span></p><p><b>Current:</b> <span class="device-current"></span></p><div class="activity"></div><div class="actions"><input class="message-input" placeholder="Message"><button onclick="sendMessage('${escAttr(d.id)}')">Send</button><button class="secondary" onclick="shot('${escAttr(d.id)}')">Screenshot</button></div><img class="screenshot hidden" alt="Latest screenshot">`}
+function deviceTemplate(d){return `<div class="row"><div><h3 class="device-title"></h3><span class="device-status"></span></div><small class="muted device-agent"></small></div><p><b>User:</b> <span class="device-user"></span></p><p><b>Current:</b> <span class="device-current"></span></p><div class="activity"></div><div class="actions"><input class="message-input" placeholder="Message"><button onclick="sendMessage('${escAttr(d.id)}')">Send</button><button class="secondary" onclick="shot('${escAttr(d.id)}')">Screenshot</button><button class="secondary update-btn" onclick="checkUpdate('${escAttr(d.id)}',this)">Update now</button></div><img class="screenshot hidden" alt="Latest screenshot">`}
 function updateDeviceCard(card,d){card.querySelector('.device-title').textContent=`${d.child} — ${d.name}`;const status=card.querySelector('.device-status');status.className=`device-status ${d.online?'online':'offline'}`;status.textContent=`● ${d.online?'Online':'Offline'}`;card.querySelector('.device-agent').textContent=`Agent ${d.agent_version||'—'}`;card.querySelector('.device-user').textContent=d.logged_in_user||'Not reported';card.querySelector('.device-current').textContent=d.current_app||'No foreground app reported';card.querySelector('.activity').innerHTML=d.activity.map(a=>`<div><span>${esc(a.process)}</span><b>${fmt(a.seconds)}</b></div>`).join('')||'<span class="muted">No activity today.</span>'}
 
 function fmt(sec){sec=Number(sec);if(sec<60)return sec+'s';const h=Math.floor(sec/3600),m=Math.floor((sec%3600)/60);return h?`${h}h ${m}m`:`${m}m`}
 async function addChild(){if(!childNameInput.value.trim())return;await api('/api/children',{method:'POST',body:JSON.stringify({name:childNameInput.value.trim()})});childNameInput.value='';await refresh()}
 async function approve(id){const row=pendingEl.querySelector(`[data-installation-id="${cssEscape(id)}"]`);const child=Number(row?.querySelector('.pending-child')?.value),name=row?.querySelector('.pending-name')?.value.trim();if(!row||!child||!name)return;await api('/api/pending/'+id+'/approve',{method:'POST',body:JSON.stringify({child_id:child,device_name:name})});await refresh()}
 async function sendMessage(id){const card=devicesEl.querySelector(`[data-device-id="${cssEscape(id)}"]`),el=card?.querySelector('.message-input');if(!el?.value.trim())return;await api(`/api/devices/${id}/commands`,{method:'POST',body:JSON.stringify({kind:'message',payload:el.value.trim()})});el.value=''}
+
+async function checkUpdate(id,button){
+  const original=button?.textContent||'Update now';
+  if(button){button.disabled=true;button.textContent='Queued…'}
+  try{
+    await api(`/api/devices/${id}/commands`,{method:'POST',body:JSON.stringify({kind:'check_update',payload:''})});
+    if(button)button.textContent='Check queued';
+    setTimeout(()=>{if(button){button.disabled=false;button.textContent=original}},2500);
+  }catch(e){
+    if(button){button.disabled=false;button.textContent=original}
+    alert(`Could not queue update check: ${e.message}`);
+  }
+}
+async function checkAllUpdates(){
+  const button=document.getElementById('checkAllUpdates');
+  const devices=[...state.devices];
+  if(!devices.length)return;
+  const original=button.textContent;button.disabled=true;button.textContent='Queuing…';
+  const results=await Promise.allSettled(devices.map(d=>api(`/api/devices/${d.id}/commands`,{method:'POST',body:JSON.stringify({kind:'check_update',payload:''})})));
+  const ok=results.filter(r=>r.status==='fulfilled').length;
+  button.textContent=`Queued ${ok}/${devices.length}`;
+  setTimeout(()=>{button.disabled=false;button.textContent=original},3000);
+}
 async function shot(id){const card=devicesEl.querySelector(`[data-device-id="${cssEscape(id)}"]`);await api(`/api/devices/${id}/commands`,{method:'POST',body:JSON.stringify({kind:'screenshot',payload:''})});setTimeout(()=>{const img=card?.querySelector('.screenshot');if(!img)return;img.src=`/api/devices/${id}/screenshot?t=${Date.now()}`;img.onload=()=>img.classList.remove('hidden')},2500)}
 function esc(s){return String(s??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]))}
 function escAttr(s){return esc(s).replace(/`/g,'&#96;')}

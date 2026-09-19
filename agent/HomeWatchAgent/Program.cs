@@ -167,6 +167,7 @@ public sealed class AgentContext : ApplicationContext
                 await CompleteAsync(cmd.Id, "shown");
             }
             else if (cmd.Kind == "screenshot") await ScreenshotAsync(cmd.Id);
+            else if (cmd.Kind == "check_update") await CheckUpdateAsync(true, cmd.Id);
         }
     }
 
@@ -188,19 +189,39 @@ public sealed class AgentContext : ApplicationContext
         await http.SendAsync(r);
     }
 
-    async Task CheckUpdateAsync()
+    async Task CheckUpdateAsync(bool forceRefresh = false, int? commandId = null)
     {
         lastUpdateCheck = DateTime.UtcNow;
-        using var r = Request(HttpMethod.Get, "agent/update");
-        var response = await http.SendAsync(r); if (!response.IsSuccessStatusCode) return;
+        using var r = Request(HttpMethod.Get, forceRefresh ? "agent/update?refresh=true" : "agent/update");
+        var response = await http.SendAsync(r);
+        if (!response.IsSuccessStatusCode)
+        {
+            if (commandId.HasValue) await CompleteAsync(commandId.Value, $"update check failed: HTTP {(int)response.StatusCode}");
+            return;
+        }
         var m = JsonSerializer.Deserialize<UpdateManifest>(await response.Content.ReadAsStringAsync(), new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
-        if (m?.Available != true || !Version.TryParse(m.Version, out var target) || !Version.TryParse(AgentVersion, out var current) || target <= current) return;
+        if (m?.Available != true || !Version.TryParse(m.Version, out var target) || !Version.TryParse(AgentVersion, out var current) || target <= current)
+        {
+            if (commandId.HasValue) await CompleteAsync(commandId.Value, $"already current ({AgentVersion})");
+            return;
+        }
         Log($"Update available: {AgentVersion} -> {m.Version}");
         var bytes = await http.GetByteArrayAsync(m.Url);
         var hash = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
-        if (!hash.Equals(m.Sha256, StringComparison.OrdinalIgnoreCase)) { Log("Update rejected: SHA-256 mismatch"); return; }
+        if (!hash.Equals(m.Sha256, StringComparison.OrdinalIgnoreCase))
+        {
+            Log("Update rejected: SHA-256 mismatch");
+            if (commandId.HasValue) await CompleteAsync(commandId.Value, "update rejected: SHA-256 mismatch");
+            return;
+        }
         var zip = Path.Combine(dataDir, $"update-{m.Version}.zip"); await File.WriteAllBytesAsync(zip, bytes);
-        var installedUpdater = Path.Combine(AppContext.BaseDirectory, "HomeWatchUpdater.exe"); if (!File.Exists(installedUpdater)) return;
+        var installedUpdater = Path.Combine(AppContext.BaseDirectory, "HomeWatchUpdater.exe");
+        if (!File.Exists(installedUpdater))
+        {
+            if (commandId.HasValue) await CompleteAsync(commandId.Value, "updater executable missing");
+            return;
+        }
+        if (commandId.HasValue) await CompleteAsync(commandId.Value, $"update {m.Version} staged");
         var tempUpdater = Path.Combine(Path.GetTempPath(), $"HomeWatchUpdater-{Guid.NewGuid():N}.exe"); File.Copy(installedUpdater, tempUpdater);
         Process.Start(new ProcessStartInfo(tempUpdater, $"{Environment.ProcessId} \"{AppContext.BaseDirectory.TrimEnd('\\')}\" \"{zip}\"") { UseShellExecute = true });
         Log($"Update {m.Version} staged; handing off to updater");

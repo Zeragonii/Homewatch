@@ -1,4 +1,4 @@
-# HomeWatch v0.1.5
+# HomeWatch v0.1.6.5
 
 A self-hosted, multi-device parental monitoring MVP with a Windows tray agent.
 
@@ -144,3 +144,8 @@ HomeWatch is intentionally visible parental-management software rather than cove
 - no role-based parent accounts yet;
 - screenshot storage is local filesystem storage on the server;
 - self-update verifies hashes, but signed-package verification is a future hardening step.
+
+
+## v0.1.6 manual update checks
+
+The parent dashboard can queue an immediate update check for one device or all enrolled devices. Manual checks bypass the server's short GitHub release cache, while the normal 15-minute background check remains enabled. Offline agents keep the queued command and execute it when they next reconnect.

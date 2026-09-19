@@ -336,8 +336,8 @@ def approve_pending(installation_id: str, body: ApproveBody, db: Session = Depen
 
 @app.post("/api/devices/{device_id}/commands", dependencies=[Depends(require_admin)])
 def create_command(device_id: str, body: CommandBody, db: Session = Depends(db_session)):
-    if body.kind not in {"message", "screenshot"}:
-        raise HTTPException(400, "Unsupported v0.1 command")
+    if body.kind not in {"message", "screenshot", "check_update"}:
+        raise HTTPException(400, "Unsupported command")
     if not db.get(Device, device_id):
         raise HTTPException(404, "Device not found")
     cmd = Command(device_id=device_id, kind=body.kind, payload=body.payload)
@@ -482,7 +482,7 @@ def upload_screenshot(command_id: int, image: UploadFile = File(...), device: De
 
 _github_release_cache: dict[str, object] = {"checked_at": None, "manifest": None}
 
-def github_release_manifest() -> Optional[dict]:
+def github_release_manifest(force: bool = False) -> Optional[dict]:
     """Resolve the latest non-prerelease GitHub release into an agent update manifest.
 
     The release workflow publishes a ZIP and a matching .sha256 asset. This keeps the
@@ -492,7 +492,7 @@ def github_release_manifest() -> Optional[dict]:
         return None
     now = datetime.now(timezone.utc)
     checked = _github_release_cache.get("checked_at")
-    if isinstance(checked, datetime) and now - checked < timedelta(minutes=5):
+    if not force and isinstance(checked, datetime) and now - checked < timedelta(minutes=5):
         return _github_release_cache.get("manifest")  # type: ignore[return-value]
     _github_release_cache["checked_at"] = now
     headers = {"Accept": "application/vnd.github+json", "User-Agent": "HomeWatch"}
@@ -526,10 +526,10 @@ def github_release_manifest() -> Optional[dict]:
         return _github_release_cache.get("manifest")  # type: ignore[return-value]
 
 @app.get("/agent/update")
-def update_manifest(device: Device = Depends(agent_auth), db: Session = Depends(db_session)):
+def update_manifest(refresh: bool = False, device: Device = Depends(agent_auth), db: Session = Depends(db_session)):
     # A manually promoted server release wins. Otherwise automatically follow the
     # latest normal GitHub Release from AGENT_RELEASE_REPO.
     release = db.scalar(select(AgentRelease).where(AgentRelease.channel == "stable", AgentRelease.promoted == True).order_by(AgentRelease.id.desc()))
     if release:
         return {"available": True, "version": release.version, "url": release.url, "sha256": release.sha256}
-    return github_release_manifest() or {"available": False}
+    return github_release_manifest(force=refresh) or {"available": False}
