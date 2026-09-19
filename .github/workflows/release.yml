@@ -28,10 +28,18 @@ jobs:
           if ($env:GITHUB_REF -like 'refs/tags/v*') {
             $version = $env:GITHUB_REF_NAME.Substring(1)
           } else {
-            $version = '0.3.0'
+            $version = '0.3.1'
           }
           "HOMEWATCH_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           Write-Host "Building HomeWatch Agent $version"
+
+      - name: Sanity-check generated C# source
+        shell: pwsh
+        run: |
+          $source = Get-Content agent/HomeWatchAgent/Program.cs -Raw
+          if ($source -match '\\n\s*\{') {
+            throw 'Program.cs contains a literal \n escape before an opening brace; generated C# is malformed.'
+          }
 
       - name: Publish agent and updater
         shell: pwsh

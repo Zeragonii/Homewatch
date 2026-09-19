@@ -157,7 +157,78 @@ public sealed class AgentContext : ApplicationContext
         lastActivityFlush = DateTime.UtcNow;
     }
 
-    async Task CheckPolicyAsync()\n    {\n        lastPolicyCheck = DateTime.UtcNow;\n        using var r = Request(HttpMethod.Get, "agent/policy");\n        var response = await http.SendAsync(r);\n        if (!response.IsSuccessStatusCode) return;\n        var policy = JsonSerializer.Deserialize<PolicyState>(await response.Content.ReadAsStringAsync(), new JsonSerializerOptions { PropertyNameCaseInsensitive = true });\n        if (policy?.Enabled != true) { lastPolicyNotice = ""; return; }\n\n        if (policy.App?.Blocked == true && !string.IsNullOrWhiteSpace(policy.App.ProcessName))\n        {\n            var signature = $"app:{policy.App.ProcessName}";\n            if (lastPolicyNotice != signature)\n            {\n                tray.ShowBalloonTip(5000, "HomeWatch", $"Time is up for {policy.App.ProcessName}. The app will be closed.", ToolTipIcon.Warning);\n                lastPolicyNotice = signature;\n            }\n            await CloseLimitedAppAsync(policy.App.ProcessName);\n            return;\n        }\n\n        if (policy.Blocked)\n        {\n            var signature = $"blocked:{policy.Reason}";\n            if (lastPolicyNotice != signature)\n            {\n                tray.ShowBalloonTip(5000, "HomeWatch", string.IsNullOrWhiteSpace(policy.Reason) ? "Screen time is currently unavailable." : policy.Reason, ToolTipIcon.Warning);\n                lastPolicyNotice = signature;\n            }\n            if (DateTime.UtcNow - lastPolicyEnforcement > TimeSpan.FromSeconds(30))\n            {\n                LockWorkStation();\n                lastPolicyEnforcement = DateTime.UtcNow;\n            }\n            return;\n        }\n\n        if (policy.Status is "warning" or "grace")\n        {\n            var mins = policy.RemainingSeconds.HasValue ? Math.Max(0, (int)Math.Ceiling(policy.RemainingSeconds.Value / 60.0)) : 0;\n            var signature = $"{policy.Status}:{mins}";\n            if (lastPolicyNotice != signature && (mins <= 10 || policy.Status == "grace"))\n            {\n                var text = policy.Status == "grace" ? "Your normal screen-time allowance has ended. Grace time is active." : $"About {mins} minute(s) of screen time remaining.";\n                tray.ShowBalloonTip(5000, "HomeWatch", text, ToolTipIcon.Warning);\n                lastPolicyNotice = signature;\n            }\n        }\n        else lastPolicyNotice = "";\n    }\n\n    async Task CloseLimitedAppAsync(string processName)\n    {\n        var name = Path.GetFileNameWithoutExtension(processName);\n        var blocked = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "HomeWatchAgent", "HomeWatchUpdater", "explorer", "winlogon", "csrss", "lsass", "services", "smss", "dwm" };\n        if (blocked.Contains(name)) return;\n        foreach (var process in Process.GetProcessesByName(name))\n        {\n            try\n            {\n                if (process.Id == Environment.ProcessId) continue;\n                if (process.CloseMainWindow()) { if (!process.WaitForExit(2500)) process.Kill(entireProcessTree:true); }\n                else process.Kill(entireProcessTree:true);\n            }\n            catch (Exception ex) { Log($"Policy could not close {name}: {ex.Message}"); }\n            finally { process.Dispose(); }\n        }\n        await Task.CompletedTask;\n    }\n\n    async Task PollCommandsAsync()\n    {
+    async Task CheckPolicyAsync()
+    {
+        lastPolicyCheck = DateTime.UtcNow;
+        using var r = Request(HttpMethod.Get, "agent/policy");
+        var response = await http.SendAsync(r);
+        if (!response.IsSuccessStatusCode) return;
+        var policy = JsonSerializer.Deserialize<PolicyState>(await response.Content.ReadAsStringAsync(), new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+        if (policy?.Enabled != true) { lastPolicyNotice = ""; return; }
+
+        if (policy.App?.Blocked == true && !string.IsNullOrWhiteSpace(policy.App.ProcessName))
+        {
+            var signature = $"app:{policy.App.ProcessName}";
+            if (lastPolicyNotice != signature)
+            {
+                tray.ShowBalloonTip(5000, "HomeWatch", $"Time is up for {policy.App.ProcessName}. The app will be closed.", ToolTipIcon.Warning);
+                lastPolicyNotice = signature;
+            }
+            await CloseLimitedAppAsync(policy.App.ProcessName);
+            return;
+        }
+
+        if (policy.Blocked)
+        {
+            var signature = $"blocked:{policy.Reason}";
+            if (lastPolicyNotice != signature)
+            {
+                tray.ShowBalloonTip(5000, "HomeWatch", string.IsNullOrWhiteSpace(policy.Reason) ? "Screen time is currently unavailable." : policy.Reason, ToolTipIcon.Warning);
+                lastPolicyNotice = signature;
+            }
+            if (DateTime.UtcNow - lastPolicyEnforcement > TimeSpan.FromSeconds(30))
+            {
+                LockWorkStation();
+                lastPolicyEnforcement = DateTime.UtcNow;
+            }
+            return;
+        }
+
+        if (policy.Status is "warning" or "grace")
+        {
+            var mins = policy.RemainingSeconds.HasValue ? Math.Max(0, (int)Math.Ceiling(policy.RemainingSeconds.Value / 60.0)) : 0;
+            var signature = $"{policy.Status}:{mins}";
+            if (lastPolicyNotice != signature && (mins <= 10 || policy.Status == "grace"))
+            {
+                var text = policy.Status == "grace" ? "Your normal screen-time allowance has ended. Grace time is active." : $"About {mins} minute(s) of screen time remaining.";
+                tray.ShowBalloonTip(5000, "HomeWatch", text, ToolTipIcon.Warning);
+                lastPolicyNotice = signature;
+            }
+        }
+        else lastPolicyNotice = "";
+    }
+
+    async Task CloseLimitedAppAsync(string processName)
+    {
+        var name = Path.GetFileNameWithoutExtension(processName);
+        var blocked = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "HomeWatchAgent", "HomeWatchUpdater", "explorer", "winlogon", "csrss", "lsass", "services", "smss", "dwm" };
+        if (blocked.Contains(name)) return;
+        foreach (var process in Process.GetProcessesByName(name))
+        {
+            try
+            {
+                if (process.Id == Environment.ProcessId) continue;
+                if (process.CloseMainWindow()) { if (!process.WaitForExit(2500)) process.Kill(entireProcessTree:true); }
+                else process.Kill(entireProcessTree:true);
+            }
+            catch (Exception ex) { Log($"Policy could not close {name}: {ex.Message}"); }
+            finally { process.Dispose(); }
+        }
+        await Task.CompletedTask;
+    }
+
+    async Task PollCommandsAsync()
+    {
         using var r = Request(HttpMethod.Get, "agent/commands");
         var response = await http.SendAsync(r); lastCommandPoll = DateTime.UtcNow;
         if (!response.IsSuccessStatusCode) return;
