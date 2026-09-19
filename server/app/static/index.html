@@ -12,11 +12,27 @@
   <button onclick="login()">Sign in</button><div id="loginError" class="error"></div>
 </div>
 <div id="app" class="hidden">
-<header><div><h1>HomeWatch</h1><span class="muted">Family dashboard</span></div><button class="secondary" onclick="logout()">Sign out</button></header>
+<header>
+  <div><h1>HomeWatch</h1><span class="muted">Family console</span></div>
+  <div class="header-actions"><nav><button id="nav-dashboard" class="nav active" onclick="showView('dashboard')">Dashboard</button><button id="nav-onboarding" class="nav" onclick="showView('onboarding')">Onboarding <span id="pendingBadge" class="badge hidden">0</span></button></nav><button class="secondary" onclick="logout()">Sign out</button></div>
+</header>
 <main>
-<section class="card"><div class="row"><div><h2>Children</h2><p class="muted">Create profiles before approving devices.</p></div><div class="row"><input id="childName" placeholder="Child name"><button onclick="addChild()">Add</button></div></div><div id="children" class="chips"></div></section>
-<section class="card"><h2>Pending devices</h2><div id="pending"></div></section>
-<section><h2>Devices</h2><div id="devices" class="grid"></div></section>
+<section id="view-dashboard" class="view">
+  <div class="page-title"><div><h2>Dashboard</h2><p class="muted">A quick view of your enrolled clients.</p></div></div>
+  <div class="stats">
+    <div class="stat card"><span class="muted">Clients</span><strong id="statTotal">0</strong></div>
+    <div class="stat card"><span class="muted">Online</span><strong id="statOnline">0</strong></div>
+    <div class="stat card"><span class="muted">Offline</span><strong id="statOffline">0</strong></div>
+    <div class="stat card"><span class="muted">Awaiting enrolment</span><strong id="statPending">0</strong></div>
+  </div>
+  <section><div class="section-heading"><h2>Clients</h2><span id="lastRefresh" class="muted small"></span></div><div id="devices" class="grid"></div></section>
+</section>
+
+<section id="view-onboarding" class="view hidden">
+  <div class="page-title"><div><h2>Onboarding</h2><p class="muted">Create child profiles and approve new agents here.</p></div></div>
+  <section class="card"><div class="row"><div><h2>Children</h2><p class="muted">Create profiles before approving devices.</p></div><div class="row"><input id="childName" placeholder="Child name"><button onclick="addChild()">Add</button></div></div><div id="children" class="chips"></div></section>
+  <section class="card"><div class="section-heading"><div><h2>Pending devices</h2><p class="muted">Agents waiting for administrator approval.</p></div><span id="pendingCount" class="muted"></span></div><div id="pending"></div></section>
+</section>
 </main>
 </div>
 <script src="/static/app.js"></script>
