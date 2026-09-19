@@ -53,4 +53,4 @@ jobs:
         with:
           context: ./server
           push: true
-          tags: ghcr.io/${{ github.repository_owner }}/homewatch-server:${{ github.ref_name }}
+          tags: ghcr.io/zeragonii/homewatch-server:${{ github.ref_name }}
