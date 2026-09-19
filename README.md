@@ -149,3 +149,18 @@ HomeWatch is intentionally visible parental-management software rather than cove
 ## v0.1.6 manual update checks
 
 The parent dashboard can queue an immediate update check for one device or all enrolled devices. Manual checks bypass the server's short GitHub release cache, while the normal 15-minute background check remains enabled. Offline agents keep the queued command and execute it when they next reconnect.
+
+
+## v0.3 screen-time controls
+
+The Screen time menu adds child-level policies shared across all enrolled devices for that child:
+
+- weekday/weekend allowed-use windows;
+- weekday/weekend daily allowances (0 means unlimited);
+- configurable warning and grace periods;
+- one-day +15/+30/+60 minute extensions;
+- per-application limits by Windows executable name;
+- automatic workstation locking when the overall policy is blocked;
+- automatic closing of an application whose specific allowance is exhausted.
+
+Set `FAMILY_TIMEZONE` (default `Europe/London`) so schedules and day boundaries match the household. Screen-time enforcement requires the v0.3 agent; older agents continue monitoring but do not enforce these policies.

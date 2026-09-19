@@ -14,7 +14,7 @@
 <div id="app" class="hidden">
 <header>
   <div><h1>HomeWatch</h1><span class="muted">Family console</span></div>
-  <div class="header-actions"><nav><button id="nav-dashboard" class="nav active" onclick="showView('dashboard')">Dashboard</button><button id="nav-onboarding" class="nav" onclick="showView('onboarding')">Onboarding <span id="pendingBadge" class="badge hidden">0</span></button></nav><button class="secondary" onclick="logout()">Sign out</button></div>
+  <div class="header-actions"><nav><button id="nav-dashboard" class="nav active" onclick="showView('dashboard')">Dashboard</button><button id="nav-screentime" class="nav" onclick="showView('screentime')">Screen time</button><button id="nav-onboarding" class="nav" onclick="showView('onboarding')">Onboarding <span id="pendingBadge" class="badge hidden">0</span></button></nav><button class="secondary" onclick="logout()">Sign out</button></div>
 </header>
 <main>
 <section id="view-dashboard" class="view">
@@ -26,6 +26,12 @@
     <div class="stat card"><span class="muted">Awaiting enrolment</span><strong id="statPending">0</strong></div>
   </div>
   <section><div class="section-heading"><h2>Clients</h2><span id="lastRefresh" class="muted small"></span></div><div id="devices" class="grid"></div></section>
+</section>
+
+
+<section id="view-screentime" class="view hidden">
+  <div class="page-title"><div><h2>Screen time</h2><p class="muted">Child-level schedules and allowances shared across all of their devices.</p></div><span id="screenTimeZone" class="muted small"></span></div>
+  <div id="screenTimeChildren"></div>
 </section>
 
 <section id="view-onboarding" class="view hidden">

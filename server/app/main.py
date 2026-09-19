@@ -7,9 +7,10 @@ import secrets
 import uuid
 import json
 import urllib.request
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone, time as dt_time
 from pathlib import Path
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
@@ -27,6 +28,11 @@ ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin")
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "change-me")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "dev-only-change-me")
 SCREENSHOT_DIR = Path(os.getenv("SCREENSHOT_DIR", "./screenshots"))
+FAMILY_TIMEZONE = os.getenv("FAMILY_TIMEZONE", "Europe/London")
+try:
+    FAMILY_TZ = ZoneInfo(FAMILY_TIMEZONE)
+except Exception:
+    FAMILY_TZ = timezone.utc
 SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
 
 connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
@@ -45,6 +51,42 @@ class Child(Base):
     name: Mapped[str] = mapped_column(String(100), unique=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     devices: Mapped[list["Device"]] = relationship(back_populates="child")
+
+
+class ChildPolicy(Base):
+    __tablename__ = "child_policies"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    child_id: Mapped[int] = mapped_column(ForeignKey("children.id"), unique=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    weekday_start: Mapped[str] = mapped_column(String(5), default="07:00")
+    weekday_end: Mapped[str] = mapped_column(String(5), default="21:00")
+    weekend_start: Mapped[str] = mapped_column(String(5), default="07:00")
+    weekend_end: Mapped[str] = mapped_column(String(5), default="22:00")
+    weekday_minutes: Mapped[int] = mapped_column(Integer, default=0)
+    weekend_minutes: Mapped[int] = mapped_column(Integer, default=0)
+    warning_minutes: Mapped[int] = mapped_column(Integer, default=10)
+    grace_minutes: Mapped[int] = mapped_column(Integer, default=0)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+class DailyExtension(Base):
+    __tablename__ = "daily_extensions"
+    __table_args__ = (UniqueConstraint("child_id", "day", name="uq_child_extension_day"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    child_id: Mapped[int] = mapped_column(ForeignKey("children.id"))
+    day: Mapped[date] = mapped_column(Date)
+    minutes: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class AppLimit(Base):
+    __tablename__ = "app_limits"
+    __table_args__ = (UniqueConstraint("child_id", "process_name", name="uq_child_app_limit"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    child_id: Mapped[int] = mapped_column(ForeignKey("children.id"))
+    process_name: Mapped[str] = mapped_column(String(255))
+    weekday_minutes: Mapped[int] = mapped_column(Integer, default=0)
+    weekend_minutes: Mapped[int] = mapped_column(Integer, default=0)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
 
 
 class Device(Base):
@@ -227,6 +269,123 @@ class ReleaseBody(BaseModel):
     promoted: bool = False
 
 
+class PolicyBody(BaseModel):
+    enabled: bool = False
+    weekday_start: str = "07:00"
+    weekday_end: str = "21:00"
+    weekend_start: str = "07:00"
+    weekend_end: str = "22:00"
+    weekday_minutes: int = 0
+    weekend_minutes: int = 0
+    warning_minutes: int = 10
+    grace_minutes: int = 0
+
+
+class ExtensionBody(BaseModel):
+    minutes: int
+
+
+class AppLimitBody(BaseModel):
+    process_name: str
+    weekday_minutes: int = 0
+    weekend_minutes: int = 0
+    enabled: bool = True
+
+
+def family_now() -> datetime:
+    return datetime.now(timezone.utc).astimezone(FAMILY_TZ)
+
+
+def family_today() -> date:
+    return family_now().date()
+
+
+def parse_hhmm(value: str) -> dt_time:
+    try:
+        hh, mm = value.split(":", 1)
+        h, m = int(hh), int(mm)
+        if not (0 <= h <= 23 and 0 <= m <= 59):
+            raise ValueError
+        return dt_time(h, m)
+    except Exception:
+        raise HTTPException(400, f"Invalid time: {value}")
+
+
+def in_window(now_t: dt_time, start_s: str, end_s: str) -> bool:
+    start, end = parse_hhmm(start_s), parse_hhmm(end_s)
+    if start == end:
+        return True
+    if start < end:
+        return start <= now_t < end
+    return now_t >= start or now_t < end
+
+
+def policy_for(db: Session, child_id: int) -> ChildPolicy:
+    policy = db.scalar(select(ChildPolicy).where(ChildPolicy.child_id == child_id))
+    if not policy:
+        policy = ChildPolicy(child_id=child_id)
+        db.add(policy); db.commit(); db.refresh(policy)
+    return policy
+
+
+def child_usage_seconds(db: Session, child_id: int, day: date, process_name: Optional[str] = None) -> int:
+    device_ids = db.scalars(select(Device.id).where(Device.child_id == child_id)).all()
+    if not device_ids:
+        return 0
+    stmt = select(ActivityDaily).where(ActivityDaily.device_id.in_(device_ids), ActivityDaily.day == day)
+    rows = db.scalars(stmt).all()
+    if process_name is not None:
+        return sum(r.seconds for r in rows if r.process_name.lower() == process_name.lower())
+    return sum(r.seconds for r in rows)
+
+
+def child_policy_state(db: Session, child_id: int, current_app: str = "") -> dict:
+    child = db.get(Child, child_id)
+    if not child:
+        raise HTTPException(404, "Child not found")
+    policy = policy_for(db, child_id)
+    now = family_now(); today = now.date(); weekend = now.weekday() >= 5
+    start = policy.weekend_start if weekend else policy.weekday_start
+    end = policy.weekend_end if weekend else policy.weekday_end
+    allowance_min = policy.weekend_minutes if weekend else policy.weekday_minutes
+    extension = db.scalar(select(DailyExtension).where(DailyExtension.child_id == child_id, DailyExtension.day == today))
+    extension_min = extension.minutes if extension else 0
+    used = child_usage_seconds(db, child_id, today)
+    allowed_by_window = in_window(now.timetz().replace(tzinfo=None), start, end)
+    base_seconds = max(0, allowance_min + extension_min) * 60
+    grace_seconds = max(0, policy.grace_minutes) * 60
+    hard_limit = base_seconds + grace_seconds if allowance_min > 0 else 0
+    remaining = max(0, base_seconds - used) if allowance_min > 0 else None
+    status = "disabled" if not policy.enabled else "allowed"
+    reason = ""
+    blocked = False
+    if policy.enabled and not allowed_by_window:
+        blocked, status, reason = True, "blocked", f"Outside allowed hours ({start}–{end})"
+    elif policy.enabled and allowance_min > 0 and used >= hard_limit:
+        blocked, status, reason = True, "blocked", "Daily screen-time allowance exhausted"
+    elif policy.enabled and allowance_min > 0 and used >= base_seconds:
+        status, reason = "grace", "Daily allowance exhausted; grace period active"
+    elif policy.enabled and allowance_min > 0 and remaining is not None and remaining <= max(0, policy.warning_minutes) * 60:
+        status, reason = "warning", "Daily allowance nearly exhausted"
+
+    app_state = None
+    if current_app:
+        limits = db.scalars(select(AppLimit).where(AppLimit.child_id == child_id, AppLimit.enabled == True)).all()
+        limit = next((x for x in limits if x.process_name.lower() == current_app.lower()), None)
+        if limit:
+            minutes = limit.weekend_minutes if weekend else limit.weekday_minutes
+            app_used = child_usage_seconds(db, child_id, today, limit.process_name)
+            app_state = {"process_name": limit.process_name, "used_seconds": app_used, "limit_seconds": minutes * 60 if minutes > 0 else 0, "blocked": bool(minutes > 0 and app_used >= minutes * 60)}
+
+    return {
+        "enabled": policy.enabled, "status": status, "blocked": blocked, "reason": reason,
+        "timezone": FAMILY_TIMEZONE, "local_time": now.isoformat(), "window_start": start, "window_end": end,
+        "used_seconds": used, "allowance_seconds": allowance_min * 60 if allowance_min > 0 else 0,
+        "extension_minutes": extension_min, "grace_minutes": policy.grace_minutes, "warning_minutes": policy.warning_minutes,
+        "remaining_seconds": remaining, "app": app_state,
+    }
+
+
 @app.get("/", response_class=HTMLResponse)
 def index():
     return (static_dir / "index.html").read_text(encoding="utf-8")
@@ -253,7 +412,7 @@ def dashboard(db: Session = Depends(db_session)):
     children = db.scalars(select(Child).order_by(Child.name)).all()
     pending = db.scalars(select(PendingAgent).where(PendingAgent.status == "pending").order_by(PendingAgent.created_at)).all()
     devices = db.scalars(select(Device).order_by(Device.name)).all()
-    today = datetime.now(timezone.utc).date()
+    today = family_today()
     activity_rows = db.scalars(select(ActivityDaily).where(ActivityDaily.day == today)).all()
     activity = {}
     for row in activity_rows:
@@ -313,6 +472,66 @@ def create_child(body: ChildBody, db: Session = Depends(db_session)):
     child = Child(name=name)
     db.add(child); db.commit(); db.refresh(child)
     return {"id": child.id, "name": child.name}
+
+
+@app.get("/api/screentime", dependencies=[Depends(require_admin)])
+def screentime(db: Session = Depends(db_session)):
+    children = db.scalars(select(Child).order_by(Child.name)).all()
+    out=[]
+    today=family_today()
+    for child in children:
+        policy=policy_for(db, child.id)
+        ext=db.scalar(select(DailyExtension).where(DailyExtension.child_id==child.id, DailyExtension.day==today))
+        limits=db.scalars(select(AppLimit).where(AppLimit.child_id==child.id).order_by(AppLimit.process_name)).all()
+        state=child_policy_state(db, child.id)
+        out.append({"id":child.id,"name":child.name,"policy":{
+            "enabled":policy.enabled,"weekday_start":policy.weekday_start,"weekday_end":policy.weekday_end,
+            "weekend_start":policy.weekend_start,"weekend_end":policy.weekend_end,"weekday_minutes":policy.weekday_minutes,
+            "weekend_minutes":policy.weekend_minutes,"warning_minutes":policy.warning_minutes,"grace_minutes":policy.grace_minutes},
+            "today":{"used_seconds":state["used_seconds"],"extension_minutes":ext.minutes if ext else 0,"status":state["status"],"reason":state["reason"]},
+            "app_limits":[{"id":x.id,"process_name":x.process_name,"weekday_minutes":x.weekday_minutes,"weekend_minutes":x.weekend_minutes,"enabled":x.enabled} for x in limits]})
+    return {"timezone":FAMILY_TIMEZONE,"children":out}
+
+
+@app.put("/api/children/{child_id}/policy", dependencies=[Depends(require_admin)])
+def update_policy(child_id:int, body:PolicyBody, db:Session=Depends(db_session)):
+    if not db.get(Child,child_id): raise HTTPException(404,"Child not found")
+    for value in (body.weekday_start,body.weekday_end,body.weekend_start,body.weekend_end): parse_hhmm(value)
+    for value in (body.weekday_minutes,body.weekend_minutes,body.warning_minutes,body.grace_minutes):
+        if value < 0 or value > 1440: raise HTTPException(400,"Minute values must be between 0 and 1440")
+    p=policy_for(db,child_id)
+    p.enabled=body.enabled;p.weekday_start=body.weekday_start;p.weekday_end=body.weekday_end;p.weekend_start=body.weekend_start;p.weekend_end=body.weekend_end
+    p.weekday_minutes=body.weekday_minutes;p.weekend_minutes=body.weekend_minutes;p.warning_minutes=body.warning_minutes;p.grace_minutes=body.grace_minutes;p.updated_at=datetime.now(timezone.utc)
+    db.commit();return {"ok":True}
+
+
+@app.post("/api/children/{child_id}/extension", dependencies=[Depends(require_admin)])
+def add_extension(child_id:int, body:ExtensionBody, db:Session=Depends(db_session)):
+    if not db.get(Child,child_id): raise HTTPException(404,"Child not found")
+    if body.minutes < -1440 or body.minutes > 1440: raise HTTPException(400,"Invalid extension")
+    today=family_today(); row=db.scalar(select(DailyExtension).where(DailyExtension.child_id==child_id,DailyExtension.day==today))
+    if not row: row=DailyExtension(child_id=child_id,day=today,minutes=0);db.add(row)
+    row.minutes=max(0,row.minutes+body.minutes);db.commit();return {"ok":True,"minutes":row.minutes}
+
+
+@app.post("/api/children/{child_id}/app-limits", dependencies=[Depends(require_admin)])
+def upsert_app_limit(child_id:int, body:AppLimitBody, db:Session=Depends(db_session)):
+    if not db.get(Child,child_id): raise HTTPException(404,"Child not found")
+    process=body.process_name.strip()[:255]
+    if not process: raise HTTPException(400,"Process name required")
+    if not process.lower().endswith('.exe'): process += '.exe'
+    if body.weekday_minutes<0 or body.weekend_minutes<0: raise HTTPException(400,"Minutes cannot be negative")
+    row=db.scalar(select(AppLimit).where(AppLimit.child_id==child_id,AppLimit.process_name==process))
+    if not row: row=AppLimit(child_id=child_id,process_name=process);db.add(row)
+    row.weekday_minutes=min(body.weekday_minutes,1440);row.weekend_minutes=min(body.weekend_minutes,1440);row.enabled=body.enabled
+    db.commit();db.refresh(row);return {"id":row.id}
+
+
+@app.delete("/api/app-limits/{limit_id}", dependencies=[Depends(require_admin)])
+def delete_app_limit(limit_id:int, db:Session=Depends(db_session)):
+    row=db.get(AppLimit,limit_id)
+    if not row: raise HTTPException(404,"App limit not found")
+    db.delete(row);db.commit();return {"ok":True}
 
 
 @app.post("/api/pending/{installation_id}/approve", dependencies=[Depends(require_admin)])
@@ -445,7 +664,7 @@ def heartbeat(body: HeartbeatBody, device: Device = Depends(agent_auth), db: Ses
 
 @app.post("/agent/activity")
 def activity(body: ActivityBody, device: Device = Depends(agent_auth), db: Session = Depends(db_session)):
-    today = datetime.now(timezone.utc).date()
+    today = family_today()
     for process_name, seconds in body.usage.items():
         seconds = max(0, min(int(seconds), 3600))
         if seconds == 0:
@@ -459,6 +678,11 @@ def activity(body: ActivityBody, device: Device = Depends(agent_auth), db: Sessi
             db.add(ActivityDaily(device_id=device.id, day=today, process_name=name, seconds=seconds))
     db.commit()
     return {"ok": True}
+
+
+@app.get("/agent/policy")
+def agent_policy(device: Device = Depends(agent_auth), db: Session = Depends(db_session)):
+    return child_policy_state(db, device.child_id, device.current_app)
 
 
 @app.get("/agent/commands")

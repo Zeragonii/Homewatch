@@ -9,6 +9,7 @@ const loginErrorEl=document.getElementById('loginError');
 const childrenEl=document.getElementById('children');
 const pendingEl=document.getElementById('pending');
 const devicesEl=document.getElementById('devices');
+const screenTimeChildren=document.getElementById('screenTimeChildren');
 const childNameInput=document.getElementById('childName');
 const statTotal=document.getElementById('statTotal');
 const statOnline=document.getElementById('statOnline');
@@ -23,9 +24,9 @@ async function login(){try{await api('/api/login',{method:'POST',body:JSON.strin
 async function logout(){await fetch('/api/logout',{method:'POST'});location.reload()}
 async function showApp(){loginPanel.classList.add('hidden');appPanel.classList.remove('hidden');await refresh();if(!refreshTimer)refreshTimer=setInterval(refresh,5000)}
 
-function showView(view){currentView=view;document.getElementById('view-dashboard').classList.toggle('hidden',view!=='dashboard');document.getElementById('view-onboarding').classList.toggle('hidden',view!=='onboarding');document.getElementById('nav-dashboard').classList.toggle('active',view==='dashboard');document.getElementById('nav-onboarding').classList.toggle('active',view==='onboarding')}
+function showView(view){currentView=view;['dashboard','screentime','onboarding'].forEach(v=>{document.getElementById(`view-${v}`).classList.toggle('hidden',v!==view);document.getElementById(`nav-${v}`).classList.toggle('active',v===view)});if(view==='screentime')loadScreenTime()}
 
-async function refresh(){try{const next=await api('/api/dashboard');state=next;renderSummary();renderChildren();renderPending();patchDevices();lastRefresh.textContent=`Updated ${new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'})}`;}catch(e){if(e.message==='AUTH'){appPanel.classList.add('hidden');loginPanel.classList.remove('hidden');if(refreshTimer){clearInterval(refreshTimer);refreshTimer=null}}}}
+async function refresh(){try{const next=await api('/api/dashboard');state=next;renderSummary();renderChildren();renderPending();patchDevices();lastRefresh.textContent=`Updated ${new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'})}`;if(currentView==='screentime')loadScreenTime();}catch(e){if(e.message==='AUTH'){appPanel.classList.add('hidden');loginPanel.classList.remove('hidden');if(refreshTimer){clearInterval(refreshTimer);refreshTimer=null}}}}
 
 function renderSummary(){const total=state.devices.length,online=state.devices.filter(d=>d.online).length,pending=state.pending.length;statTotal.textContent=total;statOnline.textContent=online;statOffline.textContent=total-online;statPending.textContent=pending;pendingCount.textContent=pending?`${pending} waiting`:'None waiting';pendingBadge.textContent=pending;pendingBadge.classList.toggle('hidden',pending===0)}
 function renderChildren(){
@@ -122,5 +123,53 @@ async function shot(id){const card=devicesEl.querySelector(`[data-device-id="${c
 function esc(s){return String(s??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]))}
 function escAttr(s){return esc(s).replace(/`/g,'&#96;')}
 function cssEscape(s){return window.CSS?.escape?CSS.escape(String(s)):String(s).replace(/[^a-zA-Z0-9_-]/g,'\\$&')}
+
+
+async function loadScreenTime(){
+  if(!screenTimeChildren)return;
+  try{
+    const data=await api('/api/screentime');
+    document.getElementById('screenTimeZone').textContent=`Schedule timezone: ${data.timezone}`;
+    patchScreenTime(data.children||[]);
+  }catch(e){screenTimeChildren.innerHTML=`<div class="card error">${esc(e.message)}</div>`}
+}
+function patchScreenTime(children){
+  const keep=new Set(children.map(c=>String(c.id)));
+  [...screenTimeChildren.querySelectorAll('[data-st-child]')].forEach(el=>{if(!keep.has(el.dataset.stChild))el.remove()});
+  for(const c of children){
+    let card=screenTimeChildren.querySelector(`[data-st-child="${cssEscape(c.id)}"]`);
+    if(!card){card=document.createElement('section');card.className='card screen-time-card';card.dataset.stChild=c.id;screenTimeChildren.appendChild(card);renderScreenTimeCard(card,c,true)}
+    else renderScreenTimeCard(card,c,false);
+  }
+  if(!children.length)screenTimeChildren.innerHTML='<div class="card muted">Create a child profile first.</div>'
+}
+function renderScreenTimeCard(card,c,initial){
+  const p=c.policy,t=c.today;
+  if(initial){
+    card.innerHTML=`<div class="section-heading"><div><h3>${esc(c.name)}</h3><div class="muted st-summary"></div></div><label class="toggle"><input class="st-enabled" type="checkbox"> Enforce limits</label></div>
+    <div class="policy-grid">
+      <div><h4>Weekdays</h4><label>Allowed from <input class="st-wd-start" type="time"></label><label>Until <input class="st-wd-end" type="time"></label><label>Daily allowance <input class="st-wd-min" type="number" min="0" max="1440"> min</label></div>
+      <div><h4>Weekends</h4><label>Allowed from <input class="st-we-start" type="time"></label><label>Until <input class="st-we-end" type="time"></label><label>Daily allowance <input class="st-we-min" type="number" min="0" max="1440"> min</label></div>
+      <div><h4>Warnings</h4><label>Warn with <input class="st-warning" type="number" min="0" max="120"> min left</label><label>Grace after limit <input class="st-grace" type="number" min="0" max="120"> min</label></div>
+    </div>
+    <div class="row"><button onclick="savePolicy(${c.id},this)">Save policy</button><div class="extension-actions"><span class="muted">Add today:</span><button class="secondary" onclick="extendTime(${c.id},15)">+15m</button><button class="secondary" onclick="extendTime(${c.id},30)">+30m</button><button class="secondary" onclick="extendTime(${c.id},60)">+60m</button></div></div>
+    <div class="app-limits"><h4>Application limits</h4><div class="row app-limit-add"><input class="al-process" placeholder="e.g. wow.exe"><input class="al-wd" type="number" min="0" placeholder="Weekday min"><input class="al-we" type="number" min="0" placeholder="Weekend min"><button onclick="addAppLimit(${c.id},this)">Add / update</button></div><div class="app-limit-list"></div></div>`;
+  }
+  const active=document.activeElement;
+  const set=(sel,val)=>{const el=card.querySelector(sel);if(el&&el!==active)el.value=val};
+  const chk=card.querySelector('.st-enabled');if(chk!==active)chk.checked=p.enabled;
+  set('.st-wd-start',p.weekday_start);set('.st-wd-end',p.weekday_end);set('.st-we-start',p.weekend_start);set('.st-we-end',p.weekend_end);set('.st-wd-min',p.weekday_minutes);set('.st-we-min',p.weekend_minutes);set('.st-warning',p.warning_minutes);set('.st-grace',p.grace_minutes);
+  const used=Math.round(t.used_seconds/60);card.querySelector('.st-summary').textContent=`Today: ${used} min used · ${t.extension_minutes} min extra · ${t.status}${t.reason?` · ${t.reason}`:''}`;
+  card.querySelector('.app-limit-list').innerHTML=(c.app_limits||[]).length?(c.app_limits||[]).map(x=>`<div class="app-limit-row"><span><strong>${esc(x.process_name)}</strong> <span class="muted">Weekday ${x.weekday_minutes||'∞'}m · Weekend ${x.weekend_minutes||'∞'}m</span></span><button class="secondary" onclick="deleteAppLimit(${x.id})">Remove</button></div>`).join(''):'<span class="muted">No application-specific limits.</span>';
+}
+async function savePolicy(id,button){
+  const card=button.closest('[data-st-child]');
+  const val=s=>card.querySelector(s).value;
+  const body={enabled:card.querySelector('.st-enabled').checked,weekday_start:val('.st-wd-start'),weekday_end:val('.st-wd-end'),weekend_start:val('.st-we-start'),weekend_end:val('.st-we-end'),weekday_minutes:+val('.st-wd-min')||0,weekend_minutes:+val('.st-we-min')||0,warning_minutes:+val('.st-warning')||0,grace_minutes:+val('.st-grace')||0};
+  button.disabled=true;try{await api(`/api/children/${id}/policy`,{method:'PUT',body:JSON.stringify(body)});button.textContent='Saved';setTimeout(()=>button.textContent='Save policy',1500);await loadScreenTime()}catch(e){alert(e.message)}finally{button.disabled=false}
+}
+async function extendTime(id,minutes){await api(`/api/children/${id}/extension`,{method:'POST',body:JSON.stringify({minutes})});await loadScreenTime()}
+async function addAppLimit(id,button){const card=button.closest('[data-st-child]');const process=card.querySelector('.al-process').value.trim();if(!process)return;await api(`/api/children/${id}/app-limits`,{method:'POST',body:JSON.stringify({process_name:process,weekday_minutes:+card.querySelector('.al-wd').value||0,weekend_minutes:+card.querySelector('.al-we').value||0,enabled:true})});card.querySelector('.al-process').value='';card.querySelector('.al-wd').value='';card.querySelector('.al-we').value='';await loadScreenTime()}
+async function deleteAppLimit(id){await api(`/api/app-limits/${id}`,{method:'DELETE'});await loadScreenTime()}
 
 (async()=>{try{await refresh();loginPanel.classList.add('hidden');appPanel.classList.remove('hidden');showView(currentView);if(!refreshTimer)refreshTimer=setInterval(refresh,5000)}catch{}})();

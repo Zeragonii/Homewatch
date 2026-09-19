@@ -44,6 +44,9 @@ public sealed class AgentContext : ApplicationContext
     DateTime lastActivityFlush = DateTime.MinValue;
     DateTime lastCommandPoll = DateTime.MinValue;
     DateTime lastUpdateCheck = DateTime.MinValue;
+    DateTime lastPolicyCheck = DateTime.MinValue;
+    DateTime lastPolicyEnforcement = DateTime.MinValue;
+    string lastPolicyNotice = "";
 
     public AgentContext()
     {
@@ -94,6 +97,7 @@ public sealed class AgentContext : ApplicationContext
                     if (DateTime.UtcNow - lastHeartbeat > TimeSpan.FromSeconds(15)) await HeartbeatAsync();
                     if (DateTime.UtcNow - lastActivityFlush > TimeSpan.FromMinutes(1)) await FlushActivityAsync();
                     if (DateTime.UtcNow - lastCommandPoll > TimeSpan.FromSeconds(3)) await PollCommandsAsync();
+                    if (DateTime.UtcNow - lastPolicyCheck > TimeSpan.FromSeconds(20)) await CheckPolicyAsync();
                     if (DateTime.UtcNow - lastUpdateCheck > TimeSpan.FromMinutes(15)) await CheckUpdateAsync();
                 }
             }
@@ -138,7 +142,7 @@ public sealed class AgentContext : ApplicationContext
     {
         var now = DateTime.UtcNow;
         var elapsed = Math.Max(0, (int)(now - lastSample).TotalSeconds);
-        if (!string.IsNullOrWhiteSpace(currentApp) && elapsed > 0) usage[currentApp] = usage.GetValueOrDefault(currentApp) + Math.Min(elapsed, 5);
+        if (!string.IsNullOrWhiteSpace(currentApp) && elapsed > 0 && IdleSeconds() < 300) usage[currentApp] = usage.GetValueOrDefault(currentApp) + Math.Min(elapsed, 5);
         currentApp = ForegroundProcessName(); lastSample = now;
     }
 
@@ -153,8 +157,7 @@ public sealed class AgentContext : ApplicationContext
         lastActivityFlush = DateTime.UtcNow;
     }
 
-    async Task PollCommandsAsync()
-    {
+    async Task CheckPolicyAsync()\n    {\n        lastPolicyCheck = DateTime.UtcNow;\n        using var r = Request(HttpMethod.Get, "agent/policy");\n        var response = await http.SendAsync(r);\n        if (!response.IsSuccessStatusCode) return;\n        var policy = JsonSerializer.Deserialize<PolicyState>(await response.Content.ReadAsStringAsync(), new JsonSerializerOptions { PropertyNameCaseInsensitive = true });\n        if (policy?.Enabled != true) { lastPolicyNotice = ""; return; }\n\n        if (policy.App?.Blocked == true && !string.IsNullOrWhiteSpace(policy.App.ProcessName))\n        {\n            var signature = $"app:{policy.App.ProcessName}";\n            if (lastPolicyNotice != signature)\n            {\n                tray.ShowBalloonTip(5000, "HomeWatch", $"Time is up for {policy.App.ProcessName}. The app will be closed.", ToolTipIcon.Warning);\n                lastPolicyNotice = signature;\n            }\n            await CloseLimitedAppAsync(policy.App.ProcessName);\n            return;\n        }\n\n        if (policy.Blocked)\n        {\n            var signature = $"blocked:{policy.Reason}";\n            if (lastPolicyNotice != signature)\n            {\n                tray.ShowBalloonTip(5000, "HomeWatch", string.IsNullOrWhiteSpace(policy.Reason) ? "Screen time is currently unavailable." : policy.Reason, ToolTipIcon.Warning);\n                lastPolicyNotice = signature;\n            }\n            if (DateTime.UtcNow - lastPolicyEnforcement > TimeSpan.FromSeconds(30))\n            {\n                LockWorkStation();\n                lastPolicyEnforcement = DateTime.UtcNow;\n            }\n            return;\n        }\n\n        if (policy.Status is "warning" or "grace")\n        {\n            var mins = policy.RemainingSeconds.HasValue ? Math.Max(0, (int)Math.Ceiling(policy.RemainingSeconds.Value / 60.0)) : 0;\n            var signature = $"{policy.Status}:{mins}";\n            if (lastPolicyNotice != signature && (mins <= 10 || policy.Status == "grace"))\n            {\n                var text = policy.Status == "grace" ? "Your normal screen-time allowance has ended. Grace time is active." : $"About {mins} minute(s) of screen time remaining.";\n                tray.ShowBalloonTip(5000, "HomeWatch", text, ToolTipIcon.Warning);\n                lastPolicyNotice = signature;\n            }\n        }\n        else lastPolicyNotice = "";\n    }\n\n    async Task CloseLimitedAppAsync(string processName)\n    {\n        var name = Path.GetFileNameWithoutExtension(processName);\n        var blocked = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "HomeWatchAgent", "HomeWatchUpdater", "explorer", "winlogon", "csrss", "lsass", "services", "smss", "dwm" };\n        if (blocked.Contains(name)) return;\n        foreach (var process in Process.GetProcessesByName(name))\n        {\n            try\n            {\n                if (process.Id == Environment.ProcessId) continue;\n                if (process.CloseMainWindow()) { if (!process.WaitForExit(2500)) process.Kill(entireProcessTree:true); }\n                else process.Kill(entireProcessTree:true);\n            }\n            catch (Exception ex) { Log($"Policy could not close {name}: {ex.Message}"); }\n            finally { process.Dispose(); }\n        }\n        await Task.CompletedTask;\n    }\n\n    async Task PollCommandsAsync()\n    {
         using var r = Request(HttpMethod.Get, "agent/commands");
         var response = await http.SendAsync(r); lastCommandPoll = DateTime.UtcNow;
         if (!response.IsSuccessStatusCode) return;
@@ -321,6 +324,17 @@ public sealed class AgentContext : ApplicationContext
         catch { }
     }
 
+    static double IdleSeconds()
+    {
+        var info = new LASTINPUTINFO { cbSize = (uint)Marshal.SizeOf<LASTINPUTINFO>() };
+        if (!GetLastInputInfo(ref info)) return 0;
+        var now = GetTickCount64();
+        return Math.Max(0, (now - info.dwTime) / 1000.0);
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct LASTINPUTINFO { public uint cbSize; public uint dwTime; }
+
     static string ForegroundProcessName()
     {
         var hwnd = GetForegroundWindow(); if (hwnd == IntPtr.Zero) return "";
@@ -329,11 +343,15 @@ public sealed class AgentContext : ApplicationContext
     }
 
     [DllImport("user32.dll", SetLastError = true)] static extern bool LockWorkStation();
+    [DllImport("user32.dll")] static extern bool GetLastInputInfo(ref LASTINPUTINFO plii);
+    [DllImport("kernel32.dll")] static extern ulong GetTickCount64();
     [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
 }
 
 public record AgentCommand(int Id, string Kind, string Payload);
+public sealed class PolicyState { public bool Enabled { get; set; } public string Status { get; set; } = ""; public bool Blocked { get; set; } public string Reason { get; set; } = ""; public int? RemainingSeconds { get; set; } public PolicyAppState? App { get; set; } }
+public sealed class PolicyAppState { public string ProcessName { get; set; } = ""; public bool Blocked { get; set; } public int UsedSeconds { get; set; } public int LimitSeconds { get; set; } }
 public sealed class UpdateManifest { public bool Available { get; set; } public string Version { get; set; } = ""; public string Url { get; set; } = ""; public string Sha256 { get; set; } = ""; }
 
 public sealed class ServerSetupForm : Form
