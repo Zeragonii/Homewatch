@@ -1,4 +1,4 @@
-# HomeWatch v0.1.6.5
+# HomeWatch v0.2.6.5
 
 A self-hosted, multi-device parental monitoring MVP with a Windows tray agent.
 

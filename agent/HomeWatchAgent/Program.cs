@@ -161,14 +161,80 @@ public sealed class AgentContext : ApplicationContext
         var commands = JsonSerializer.Deserialize<List<AgentCommand>>(await response.Content.ReadAsStringAsync(), new JsonSerializerOptions { PropertyNameCaseInsensitive = true }) ?? [];
         foreach (var cmd in commands)
         {
-            if (cmd.Kind == "message")
+            try
             {
-                MessageBox.Show(cmd.Payload, "Message from parent", MessageBoxButtons.OK, MessageBoxIcon.Information, MessageBoxDefaultButton.Button1, MessageBoxOptions.DefaultDesktopOnly);
-                await CompleteAsync(cmd.Id, "shown");
+                if (cmd.Kind == "message")
+                {
+                    MessageBox.Show(cmd.Payload, "Message from parent", MessageBoxButtons.OK, MessageBoxIcon.Information, MessageBoxDefaultButton.Button1, MessageBoxOptions.DefaultDesktopOnly);
+                    await CompleteAsync(cmd.Id, "shown");
+                }
+                else if (cmd.Kind == "screenshot") await ScreenshotAsync(cmd.Id);
+                else if (cmd.Kind == "check_update") await CheckUpdateAsync(true, cmd.Id);
+                else if (cmd.Kind == "lock") await LockAsync(cmd.Id);
+                else if (cmd.Kind == "logoff") await LogoffAsync(cmd.Id);
+                else if (cmd.Kind == "restart") await PowerAsync(cmd.Id, restart: true);
+                else if (cmd.Kind == "shutdown") await PowerAsync(cmd.Id, restart: false);
+                else if (cmd.Kind == "close_app") await CloseAppAsync(cmd.Id, cmd.Payload);
+                else await CompleteAsync(cmd.Id, "unsupported command");
             }
-            else if (cmd.Kind == "screenshot") await ScreenshotAsync(cmd.Id);
-            else if (cmd.Kind == "check_update") await CheckUpdateAsync(true, cmd.Id);
+            catch (Exception ex)
+            {
+                Log($"Command {cmd.Kind} failed: {ex.Message}");
+                try { await CompleteAsync(cmd.Id, $"failed: {ex.Message}"); } catch { }
+            }
         }
+    }
+
+    async Task LockAsync(int id)
+    {
+        if (!LockWorkStation()) { await CompleteAsync(id, "failed: LockWorkStation returned false"); return; }
+        await CompleteAsync(id, "workstation locked");
+    }
+
+    async Task LogoffAsync(int id)
+    {
+        tray.ShowBalloonTip(3000, "HomeWatch", "This Windows session will be logged off in 5 seconds.", ToolTipIcon.Warning);
+        await CompleteAsync(id, "logoff scheduled in 5 seconds");
+        await Task.Delay(TimeSpan.FromSeconds(5));
+        Process.Start(new ProcessStartInfo("shutdown.exe", "/l") { UseShellExecute = false, CreateNoWindow = true });
+    }
+
+    async Task PowerAsync(int id, bool restart)
+    {
+        var action = restart ? "restart" : "shutdown";
+        var flag = restart ? "/r" : "/s";
+        var args = $"{flag} /t 10 /c \"HomeWatch: {action} requested by parent\"";
+        using var p = Process.Start(new ProcessStartInfo("shutdown.exe", args) { UseShellExecute = false, CreateNoWindow = true });
+        if (p is null) { await CompleteAsync(id, $"failed to start {action}"); return; }
+        await CompleteAsync(id, $"{action} scheduled in 10 seconds");
+    }
+
+    async Task CloseAppAsync(int id, string payload)
+    {
+        var raw = (payload ?? "").Trim();
+        if (string.IsNullOrWhiteSpace(raw)) { await CompleteAsync(id, "failed: process name required"); return; }
+        var processName = Path.GetFileNameWithoutExtension(raw);
+        var blocked = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "HomeWatchAgent", "HomeWatchUpdater", "explorer", "winlogon", "csrss", "lsass", "services", "smss", "dwm" };
+        if (blocked.Contains(processName)) { await CompleteAsync(id, $"refused protected process: {processName}"); return; }
+        var matches = Process.GetProcessesByName(processName);
+        if (matches.Length == 0) { await CompleteAsync(id, $"process not running: {processName}"); return; }
+        var closed = 0;
+        foreach (var process in matches)
+        {
+            try
+            {
+                if (process.Id == Environment.ProcessId) continue;
+                if (process.CloseMainWindow())
+                {
+                    if (!process.WaitForExit(3000)) process.Kill(entireProcessTree: true);
+                }
+                else process.Kill(entireProcessTree: true);
+                closed++;
+            }
+            catch (Exception ex) { Log($"Could not close {processName} PID {process.Id}: {ex.Message}"); }
+            finally { process.Dispose(); }
+        }
+        await CompleteAsync(id, closed > 0 ? $"closed {closed} process(es): {processName}" : $"failed to close: {processName}");
     }
 
     async Task CompleteAsync(int id, string result)
@@ -262,6 +328,7 @@ public sealed class AgentContext : ApplicationContext
         try { return Process.GetProcessById((int)pid).ProcessName + ".exe"; } catch { return ""; }
     }
 
+    [DllImport("user32.dll", SetLastError = true)] static extern bool LockWorkStation();
     [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
 }

@@ -258,6 +258,20 @@ def dashboard(db: Session = Depends(db_session)):
     activity = {}
     for row in activity_rows:
         activity.setdefault(row.device_id, []).append({"process": row.process_name, "seconds": row.seconds})
+    command_rows = db.scalars(select(Command).order_by(Command.created_at.desc()).limit(250)).all()
+    command_history = {}
+    for row in command_rows:
+        bucket = command_history.setdefault(row.device_id, [])
+        if len(bucket) < 8:
+            bucket.append({
+                "id": row.id,
+                "kind": row.kind,
+                "payload": row.payload,
+                "status": row.status,
+                "result": row.result,
+                "created_at": row.created_at.isoformat(),
+                "completed_at": row.completed_at.isoformat() if row.completed_at else None,
+            })
     now = datetime.now(timezone.utc)
     return {
         "children": [{"id": c.id, "name": c.name} for c in children],
@@ -283,6 +297,7 @@ def dashboard(db: Session = Depends(db_session)):
                 "last_seen": d.last_seen.isoformat() if d.last_seen else None,
                 "online": bool(d.last_seen and (now - d.last_seen) < timedelta(seconds=45)),
                 "activity": sorted(activity.get(d.id, []), key=lambda x: x["seconds"], reverse=True)[:8],
+                "commands": command_history.get(d.id, []),
             } for d in devices
         ],
     }
@@ -336,8 +351,12 @@ def approve_pending(installation_id: str, body: ApproveBody, db: Session = Depen
 
 @app.post("/api/devices/{device_id}/commands", dependencies=[Depends(require_admin)])
 def create_command(device_id: str, body: CommandBody, db: Session = Depends(db_session)):
-    if body.kind not in {"message", "screenshot", "check_update"}:
+    if body.kind not in {"message", "screenshot", "check_update", "lock", "logoff", "restart", "shutdown", "close_app"}:
         raise HTTPException(400, "Unsupported command")
+    if body.kind == "close_app":
+        target = body.payload.strip()
+        if not target or len(target) > 255:
+            raise HTTPException(400, "A process name is required")
     if not db.get(Device, device_id):
         raise HTTPException(404, "Device not found")
     cmd = Command(device_id=device_id, kind=body.kind, payload=body.payload)
