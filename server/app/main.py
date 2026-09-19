@@ -257,6 +257,10 @@ class CommandBody(BaseModel):
     payload: str = ""
 
 
+class DeviceAssignmentBody(BaseModel):
+    child_id: int
+
+
 class CommandResultBody(BaseModel):
     result: str = ""
 
@@ -567,6 +571,20 @@ def approve_pending(installation_id: str, body: ApproveBody, db: Session = Depen
     db.commit()
     return {"ok": True, "device_id": device.id}
 
+
+
+
+@app.put("/api/devices/{device_id}/child", dependencies=[Depends(require_admin)])
+def reassign_device_child(device_id: str, body: DeviceAssignmentBody, db: Session = Depends(db_session)):
+    device = db.get(Device, device_id)
+    if not device:
+        raise HTTPException(404, "Device not found")
+    child = db.get(Child, body.child_id)
+    if not child:
+        raise HTTPException(404, "Child not found")
+    device.child_id = child.id
+    db.commit()
+    return {"ok": True, "device_id": device.id, "child_id": child.id, "child": child.name}
 
 @app.post("/api/devices/{device_id}/commands", dependencies=[Depends(require_admin)])
 def create_command(device_id: str, body: CommandBody, db: Session = Depends(db_session)):

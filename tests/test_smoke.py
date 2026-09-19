@@ -52,3 +52,22 @@ def test_screen_time_policy_round_trip():
     assert kid["policy"]["weekday_minutes"]==120
     assert kid["today"]["extension_minutes"]>=30
     assert any(x["process_name"]=="wow.exe" for x in kid["app_limits"])
+
+def test_device_can_be_reassigned_without_changing_identity():
+    import uuid
+    from server.app.main import SessionLocal, Device, sha256_text
+
+    a=client.post('/api/children',json={'name':'Child A '+uuid.uuid4().hex[:6]}).json()['id']
+    b=client.post('/api/children',json={'name':'Child B '+uuid.uuid4().hex[:6]}).json()['id']
+    device_id=str(uuid.uuid4())
+    with SessionLocal() as db:
+        db.add(Device(id=device_id,child_id=a,name='Reassign Test',installation_id=str(uuid.uuid4()),token_hash=sha256_text('token'),hostname='TEST-PC',os_version='Windows',agent_version='0.3.1'))
+        db.commit()
+    r=client.put(f'/api/devices/{device_id}/child',json={'child_id':b})
+    assert r.status_code==200
+    assert r.json()['device_id']==device_id
+    assert r.json()['child_id']==b
+    with SessionLocal() as db:
+        device=db.get(Device,device_id)
+        assert device is not None
+        assert device.child_id==b
