@@ -5,6 +5,8 @@ import hmac
 import os
 import secrets
 import uuid
+import json
+import urllib.request
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
@@ -14,10 +16,12 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from itsdangerous import BadSignature, URLSafeSerializer
 from pydantic import BaseModel
-from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, create_engine, select
+from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, create_engine, inspect, select, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship, sessionmaker
 
 APP_TITLE = os.getenv("APP_TITLE", "HomeWatch")
+AGENT_RELEASE_REPO = os.getenv("AGENT_RELEASE_REPO", "Zeragonii/Homewatch").strip()
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "").strip()
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./homewatch.db")
 ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin")
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "change-me")
@@ -54,6 +58,7 @@ class Device(Base):
     installation_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True, unique=True)
     token_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     current_app: Mapped[str] = mapped_column(String(255), default="")
+    logged_in_user: Mapped[str] = mapped_column(String(255), default="")
     last_seen: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     child: Mapped[Child] = relationship(back_populates="devices")
@@ -116,6 +121,13 @@ class AgentRelease(Base):
 
 
 Base.metadata.create_all(engine)
+
+# Lightweight bootstrap migration for existing v0.1 databases.
+# create_all() does not add columns to an existing table.
+with engine.begin() as conn:
+    device_columns = {c["name"] for c in inspect(conn).get_columns("devices")}
+    if "logged_in_user" not in device_columns:
+        conn.execute(text("ALTER TABLE devices ADD COLUMN logged_in_user VARCHAR(255) NOT NULL DEFAULT ''"))
 
 app = FastAPI(title=APP_TITLE)
 static_dir = Path(__file__).parent / "static"
@@ -191,6 +203,7 @@ class HeartbeatBody(BaseModel):
     os_version: str
     agent_version: str
     current_app: str = ""
+    logged_in_user: str = ""
 
 
 class ActivityBody(BaseModel):
@@ -266,6 +279,7 @@ def dashboard(db: Session = Depends(db_session)):
                 "hostname": d.hostname,
                 "agent_version": d.agent_version,
                 "current_app": d.current_app,
+                "logged_in_user": d.logged_in_user,
                 "last_seen": d.last_seen.isoformat() if d.last_seen else None,
                 "online": bool(d.last_seen and (now - d.last_seen) < timedelta(seconds=45)),
                 "activity": sorted(activity.get(d.id, []), key=lambda x: x["seconds"], reverse=True)[:8],
@@ -404,6 +418,7 @@ def heartbeat(body: HeartbeatBody, device: Device = Depends(agent_auth), db: Ses
     managed = db.get(Device, device.id)
     managed.hostname, managed.os_version, managed.agent_version = body.hostname, body.os_version, body.agent_version
     managed.current_app = body.current_app[:255]
+    managed.logged_in_user = body.logged_in_user[:255]
     managed.last_seen = datetime.now(timezone.utc)
     db.commit()
     return {"ok": True}
@@ -464,9 +479,57 @@ def upload_screenshot(command_id: int, image: UploadFile = File(...), device: De
     return {"ok": True}
 
 
+
+_github_release_cache: dict[str, object] = {"checked_at": None, "manifest": None}
+
+def github_release_manifest() -> Optional[dict]:
+    """Resolve the latest non-prerelease GitHub release into an agent update manifest.
+
+    The release workflow publishes a ZIP and a matching .sha256 asset. This keeps the
+    server as the agent-facing authority while avoiding manual release registration.
+    """
+    if not AGENT_RELEASE_REPO:
+        return None
+    now = datetime.now(timezone.utc)
+    checked = _github_release_cache.get("checked_at")
+    if isinstance(checked, datetime) and now - checked < timedelta(minutes=5):
+        return _github_release_cache.get("manifest")  # type: ignore[return-value]
+    _github_release_cache["checked_at"] = now
+    headers = {"Accept": "application/vnd.github+json", "User-Agent": "HomeWatch"}
+    if GITHUB_TOKEN:
+        headers["Authorization"] = f"Bearer {GITHUB_TOKEN}"
+    try:
+        req = urllib.request.Request(f"https://api.github.com/repos/{AGENT_RELEASE_REPO}/releases/latest", headers=headers)
+        with urllib.request.urlopen(req, timeout=10) as response:
+            release = json.load(response)
+        assets = {a.get("name"): a.get("browser_download_url") for a in release.get("assets", [])}
+        zip_url = assets.get("HomeWatch-Agent-win-x64.zip")
+        sha_url = assets.get("HomeWatch-Agent-win-x64.sha256")
+        if not zip_url or not sha_url:
+            _github_release_cache["manifest"] = None
+            return None
+        sha_req = urllib.request.Request(sha_url, headers=headers)
+        with urllib.request.urlopen(sha_req, timeout=10) as response:
+            digest = response.read(256).decode("ascii", errors="ignore").strip().split()[0].lower()
+        if len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
+            _github_release_cache["manifest"] = None
+            return None
+        version = str(release.get("tag_name", "")).lstrip("vV")
+        if not version:
+            _github_release_cache["manifest"] = None
+            return None
+        manifest = {"available": True, "version": version, "url": zip_url, "sha256": digest}
+        _github_release_cache["manifest"] = manifest
+        return manifest
+    except Exception:
+        # A temporary GitHub outage must never break the agent heartbeat/update loop.
+        return _github_release_cache.get("manifest")  # type: ignore[return-value]
+
 @app.get("/agent/update")
 def update_manifest(device: Device = Depends(agent_auth), db: Session = Depends(db_session)):
+    # A manually promoted server release wins. Otherwise automatically follow the
+    # latest normal GitHub Release from AGENT_RELEASE_REPO.
     release = db.scalar(select(AgentRelease).where(AgentRelease.channel == "stable", AgentRelease.promoted == True).order_by(AgentRelease.id.desc()))
-    if not release:
-        return {"available": False}
-    return {"available": True, "version": release.version, "url": release.url, "sha256": release.sha256}
+    if release:
+        return {"available": True, "version": release.version, "url": release.url, "sha256": release.sha256}
+    return github_release_manifest() or {"available": False}

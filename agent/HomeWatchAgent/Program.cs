@@ -5,6 +5,7 @@ using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
+using System.Reflection;
 using System.Text.Json;
 using Microsoft.Win32;
 
@@ -31,7 +32,7 @@ public sealed class AgentConfig
 
 public sealed class AgentContext : ApplicationContext
 {
-    const string AgentVersion = "0.1.0";
+    static readonly string AgentVersion = GetAgentVersion();
     readonly string dataDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "HomeWatch");
     readonly HttpClient http = new() { Timeout = TimeSpan.FromSeconds(30) };
     readonly NotifyIcon tray;
@@ -96,7 +97,7 @@ public sealed class AgentContext : ApplicationContext
                     if (DateTime.UtcNow - lastUpdateCheck > TimeSpan.FromMinutes(15)) await CheckUpdateAsync();
                 }
             }
-            catch { /* keep agent alive; diagnostics/logging comes next */ }
+            catch (Exception ex) { Log($"Loop error: {ex.Message}"); }
             await Task.Delay(1000);
         }
     }
@@ -128,7 +129,7 @@ public sealed class AgentContext : ApplicationContext
 
     async Task HeartbeatAsync()
     {
-        using var content = JsonContent.Create(new { hostname = Environment.MachineName, os_version = Environment.OSVersion.VersionString, agent_version = AgentVersion, current_app = currentApp });
+        using var content = JsonContent.Create(new { hostname = Environment.MachineName, os_version = Environment.OSVersion.VersionString, agent_version = AgentVersion, current_app = currentApp, logged_in_user = LoggedInUser() });
         using var r = Request(HttpMethod.Post, "agent/heartbeat", content);
         await http.SendAsync(r); lastHeartbeat = DateTime.UtcNow;
     }
@@ -194,16 +195,44 @@ public sealed class AgentContext : ApplicationContext
         var response = await http.SendAsync(r); if (!response.IsSuccessStatusCode) return;
         var m = JsonSerializer.Deserialize<UpdateManifest>(await response.Content.ReadAsStringAsync(), new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
         if (m?.Available != true || !Version.TryParse(m.Version, out var target) || !Version.TryParse(AgentVersion, out var current) || target <= current) return;
+        Log($"Update available: {AgentVersion} -> {m.Version}");
         var bytes = await http.GetByteArrayAsync(m.Url);
-        var hash = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant(); if (!hash.Equals(m.Sha256, StringComparison.OrdinalIgnoreCase)) return;
+        var hash = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
+        if (!hash.Equals(m.Sha256, StringComparison.OrdinalIgnoreCase)) { Log("Update rejected: SHA-256 mismatch"); return; }
         var zip = Path.Combine(dataDir, $"update-{m.Version}.zip"); await File.WriteAllBytesAsync(zip, bytes);
         var installedUpdater = Path.Combine(AppContext.BaseDirectory, "HomeWatchUpdater.exe"); if (!File.Exists(installedUpdater)) return;
         var tempUpdater = Path.Combine(Path.GetTempPath(), $"HomeWatchUpdater-{Guid.NewGuid():N}.exe"); File.Copy(installedUpdater, tempUpdater);
         Process.Start(new ProcessStartInfo(tempUpdater, $"{Environment.ProcessId} \"{AppContext.BaseDirectory.TrimEnd('\\')}\" \"{zip}\"") { UseShellExecute = true });
+        Log($"Update {m.Version} staged; handing off to updater");
         tray.Visible = false; Application.Exit();
     }
 
-    void ShowStatus() => MessageBox.Show($"Server: {config.ServerUrl}\nDevice: {config.DeviceId ?? "Awaiting approval"}\nCurrent app: {currentApp}", "HomeWatch Agent");
+    void ShowStatus() => MessageBox.Show($"Server: {config.ServerUrl}\nDevice: {config.DeviceId ?? "Awaiting approval"}\nVersion: {AgentVersion}\nUser: {LoggedInUser()}\nCurrent app: {currentApp}", "HomeWatch Agent");
+
+    static string GetAgentVersion()
+    {
+        var info = typeof(AgentContext).Assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion;
+        if (!string.IsNullOrWhiteSpace(info)) return info.Split('+')[0];
+        return typeof(AgentContext).Assembly.GetName().Version?.ToString(3) ?? "0.0.0";
+    }
+
+    static string LoggedInUser()
+    {
+        var domain = Environment.UserDomainName;
+        var user = Environment.UserName;
+        return string.IsNullOrWhiteSpace(domain) ? user : $"{domain}\\{user}";
+    }
+
+    void Log(string message)
+    {
+        try
+        {
+            var path = Path.Combine(dataDir, "agent.log");
+            if (File.Exists(path) && new FileInfo(path).Length > 2 * 1024 * 1024) File.Move(path, path + ".old", true);
+            File.AppendAllText(path, $"{DateTime.Now:yyyy-MM-dd HH:mm:ss} {message}{Environment.NewLine}");
+        }
+        catch { }
+    }
 
     static string ForegroundProcessName()
     {

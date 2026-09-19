@@ -1,4 +1,5 @@
 name: Build and release
+
 on:
   push:
     branches:
@@ -16,31 +17,63 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0.x'
-      - name: Publish agent
+
+      - name: Resolve version
         shell: pwsh
         run: |
-          dotnet publish agent/HomeWatchAgent/HomeWatchAgent.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o out/agent
-          dotnet publish agent/HomeWatchUpdater/HomeWatchUpdater.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o out/updater
-          Copy-Item out/updater/HomeWatchUpdater.exe out/agent/HomeWatchUpdater.exe
+          if ($env:GITHUB_REF -like 'refs/tags/v*') {
+            $version = $env:GITHUB_REF_NAME.Substring(1)
+          } else {
+            $version = '0.1.5'
+          }
+          "HOMEWATCH_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "Building HomeWatch Agent $version"
+
+      - name: Publish agent and updater
+        shell: pwsh
+        run: |
+          dotnet publish agent/HomeWatchAgent/HomeWatchAgent.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:Version=$env:HOMEWATCH_VERSION -o out/agent
+          dotnet publish agent/HomeWatchUpdater/HomeWatchUpdater.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:Version=$env:HOMEWATCH_VERSION -o out/updater
+          Copy-Item out/updater/HomeWatchUpdater.exe out/agent/HomeWatchUpdater.exe -Force
           # Add Authenticode signing here once a signing certificate is configured.
-          Compress-Archive -Path out/agent/* -DestinationPath HomeWatch-Agent-win-x64.zip
+          Compress-Archive -Path out/agent/* -DestinationPath HomeWatch-Agent-win-x64.zip -Force
           (Get-FileHash HomeWatch-Agent-win-x64.zip -Algorithm SHA256).Hash.ToLower() | Out-File -Encoding ascii HomeWatch-Agent-win-x64.sha256
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup --no-progress -y
+
+      - name: Build Windows installer
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          & $iscc "/DMyAppVersion=$env:HOMEWATCH_VERSION" "agent\installer\HomeWatchAgent.iss"
+          Copy-Item out/installer/HomeWatch-Agent-Setup-win-x64.exe HomeWatch-Agent-Setup-win-x64.exe -Force
+          (Get-FileHash HomeWatch-Agent-Setup-win-x64.exe -Algorithm SHA256).Hash.ToLower() | Out-File -Encoding ascii HomeWatch-Agent-Setup-win-x64.sha256
+
       - uses: actions/upload-artifact@v4
         with:
           name: HomeWatch-Agent-win-x64
           path: |
             HomeWatch-Agent-win-x64.zip
             HomeWatch-Agent-win-x64.sha256
+            HomeWatch-Agent-Setup-win-x64.exe
+            HomeWatch-Agent-Setup-win-x64.sha256
+
       - name: Attach to GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
+          generate_release_notes: true
           files: |
             HomeWatch-Agent-win-x64.zip
             HomeWatch-Agent-win-x64.sha256
+            HomeWatch-Agent-Setup-win-x64.exe
+            HomeWatch-Agent-Setup-win-x64.sha256
 
   server-image:
     runs-on: ubuntu-latest

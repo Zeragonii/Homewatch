@@ -1,21 +1,17 @@
-# HomeWatch v0.1
+# HomeWatch v0.1.5
 
-A self-hosted, multi-device parental monitoring MVP.
+A self-hosted, multi-device parental monitoring MVP with a Windows tray agent.
 
-## Included in v0.1
+## v0.1.5 highlights
 
-- Multi-child / multi-device data model
-- Server-controlled device identity
-- Zero-UUID-touch enrolment: agent submits a pending request, admin approves it
-- Re-enrolment onto an existing logical device without splitting history
-- Agent heartbeat / online state / current foreground application
-- Per-day application runtime aggregation
-- Parent-to-device messages
-- On-demand screenshots
-- Agent release promotion API and self-update plumbing
-- Docker Compose deployment with PostgreSQL
-- Windows tray agent + updater (.NET 8 / win-x64)
-- GitHub Actions workflow that builds server image and Windows release ZIP
+- Proper Windows installer (`HomeWatch-Agent-Setup-win-x64.exe`)
+- Per-user installation under `%LOCALAPPDATA%\Programs\HomeWatch`
+- Existing enrolment/config survives reinstalling or moving from the portable build
+- Automatic agent self-updates from the latest normal GitHub Release
+- Agent version comes from the actual tagged build rather than a hard-coded `0.1.0`
+- SHA-256 verification before any downloaded update is installed
+- Logged-in Windows user reported with each heartbeat and shown in the dashboard
+- Agent update/error log at `%LOCALAPPDATA%\HomeWatch\agent.log`
 
 ## Architecture
 
@@ -23,97 +19,128 @@ A self-hosted, multi-device parental monitoring MVP.
 Windows tray agent  --HTTPS-->  HomeWatch API  <--> PostgreSQL
       |                               |
  foreground app                  Parent web UI
- screenshots                     enrol / stats
- messages                        commands
- updater                         releases
+ logged-in user                  enrol / stats
+ screenshots                     commands
+ messages                        release authority
+ updater
 ```
 
 The agent installation has its own `installation_id`, but the **logical device UUID is created by the server only when an admin approves enrolment**. A reinstall can therefore be bound back onto an existing device and keep the same history.
 
-## Quick start (server)
+## Server quick start
 
-1. Copy `.env.example` to `.env` and change the secrets/password.
-2. Run:
+For Portainer/GHCR deployments use the published server image:
 
-```bash
-docker compose up -d --build
+```yaml
+services:
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: homewatch
+      POSTGRES_USER: homewatch
+      POSTGRES_PASSWORD: CHANGE_ME
+    volumes:
+      - homewatch_db:/var/lib/postgresql/data
+
+  app:
+    image: ghcr.io/zeragonii/homewatch-server:main
+    restart: unless-stopped
+    depends_on:
+      - db
+    environment:
+      ADMIN_USERNAME: admin
+      ADMIN_PASSWORD: CHANGE_ME
+      SESSION_SECRET: CHANGE_ME_LONG_RANDOM_VALUE
+      DATABASE_URL: postgresql+psycopg://homewatch:CHANGE_ME@db:5432/homewatch
+      SCREENSHOT_DIR: /data/screenshots
+      APP_TITLE: HomeWatch
+      AGENT_RELEASE_REPO: Zeragonii/Homewatch
+      # GITHUB_TOKEN: github_pat_xxx   # only required for a private GitHub repo
+    ports:
+      - "8090:8000"
+    volumes:
+      - homewatch_screenshots:/data/screenshots
+
+volumes:
+  homewatch_db:
+  homewatch_screenshots:
 ```
 
-3. Open `http://SERVER-IP:8090`.
-4. Sign in with the `ADMIN_USERNAME` / `ADMIN_PASSWORD` values from `.env`.
-5. Create a child profile.
+For real use outside your LAN, put the service behind HTTPS. Do not expose the agent API over plain HTTP on the public Internet.
 
-For real use outside your LAN, put the service behind HTTPS (for example your existing reverse proxy). **Do not expose the agent API over plain HTTP on the public Internet.**
+## Installing the Windows agent
 
-## Agent first run
+Create a tagged release, for example:
 
-The Windows agent is designed as a per-user tray application. On first launch it asks only for the HomeWatch server URL. It then appears under **Pending devices** in the admin UI.
+```bash
+git tag v0.1.5
+git push origin v0.1.5
+```
 
-Approve it and either:
+GitHub Actions builds and attaches:
 
-- create a new logical device; or
-- replace the installation attached to an existing device.
+- `HomeWatch-Agent-Setup-win-x64.exe` — recommended first install
+- `HomeWatch-Agent-Setup-win-x64.sha256`
+- `HomeWatch-Agent-win-x64.zip` — update/portable package
+- `HomeWatch-Agent-win-x64.sha256`
 
-The permanent device UUID never needs to be typed by a human.
+Run the setup EXE on the child's PC. It installs to:
 
-Agent state is stored in:
+```text
+%LOCALAPPDATA%\Programs\HomeWatch
+```
+
+The agent asks only for the HomeWatch server URL, then appears under **Onboarding** for administrator approval.
+
+Agent state remains in:
 
 ```text
 %LOCALAPPDATA%\HomeWatch\config.json
 ```
 
-## Build the Windows agent locally
+That means installing a newer setup package does not create a new logical client or lose the existing enrolment.
 
-Requires the .NET 8 SDK on Windows:
+## Automatic updates
 
-```powershell
-dotnet publish agent/HomeWatchAgent/HomeWatchAgent.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true
-dotnet publish agent/HomeWatchUpdater/HomeWatchUpdater.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true
+The server checks the latest normal GitHub Release from `AGENT_RELEASE_REPO` (cached for five minutes). It looks specifically for:
+
+```text
+HomeWatch-Agent-win-x64.zip
+HomeWatch-Agent-win-x64.sha256
 ```
 
-GitHub Actions also does this automatically on tags matching `v*`.
+An enrolled agent checks the server every 15 minutes. If the release version is newer than its running version it:
 
-## Self-updates
+1. Downloads the ZIP.
+2. Verifies the SHA-256 supplied by the server.
+3. Copies `HomeWatchUpdater.exe` to a temporary location.
+4. Exits the running agent.
+5. Replaces the installed files in-place.
+6. Restarts the agent.
 
-The server is the release authority. Promote an agent release using the API (UI control is the next polish pass):
+Because the installer is per-user under LocalAppData, normal self-updates do not need an administrator/UAC prompt.
 
-```http
-POST /api/releases
-{
-  "version": "0.1.1",
-  "url": "https://github.com/OWNER/REPO/releases/download/v0.1.1/HomeWatch-Agent-win-x64.zip",
-  "sha256": "...",
-  "channel": "stable",
-  "promoted": true
-}
-```
+A release manually promoted through `/api/releases` still takes precedence over GitHub auto-discovery, leaving room for future stable/beta/pinned update controls.
 
-Agents poll `/agent/update` and download only a promoted release newer than themselves. The SHA-256 is verified before the updater runs.
+## Private GitHub repositories
+
+If the repository/releases are private, set `GITHUB_TOKEN` on the server container to a token that can read the repository. Public repositories do not need one.
 
 ## Safety / privacy defaults
 
-HomeWatch is intentionally designed as visible parental-management software rather than covert surveillance:
+HomeWatch is intentionally visible parental-management software rather than covert surveillance:
 
 - tray icon is visible;
 - enrolment requires admin approval;
 - screenshots are on-demand, not continuously archived;
-- the agent does not include keylogging, microphone capture, credential capture, or stealth/persistence tricks;
+- no keylogging, microphone capture, credential capture, or stealth/persistence tricks;
 - credentials are revocable and per-device.
 
 ## Current limitations
 
-This is a bootstrap MVP, not yet production-hardened:
-
 - no WebRTC/live video yet;
-- no MSI/setup wizard yet (GitHub produces portable release binaries);
+- installer and binaries are not Authenticode code-signed yet, so Windows SmartScreen may warn on first install;
 - no role-based parent accounts yet;
-- update release promotion currently uses the API rather than a polished UI;
-- no code-signing step yet; the workflow has a clearly marked place to add it;
 - screenshot storage is local filesystem storage on the server;
-- automated tests cover core server logic only.
-
-## Suggested next milestones
-
-- v0.1.1: release-management UI, device detail page, charts, installer
-- v0.2: schedules/time limits, lock/logout/shutdown commands
-- v0.3: live screen viewing (WebRTC), PWA manifest/service worker, push notifications
+- self-update verifies hashes, but signed-package verification is a future hardening step.
