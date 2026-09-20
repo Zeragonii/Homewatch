@@ -522,7 +522,8 @@ public sealed class HomeWatchMessageForm : Form
     readonly System.Windows.Forms.Timer foregroundRetry = new() { Interval = 350 };
     bool completed;
     int foregroundAttempts;
-    public string ResponseText => replyBox?.Text.Trim() ?? "";
+    string responseText = "";
+    public string ResponseText => responseText;
 
     public HomeWatchMessageForm(string type, string message)
     {
@@ -659,6 +660,7 @@ public sealed class HomeWatchMessageForm : Form
                     replyBox.Focus();
                     return;
                 }
+                responseText = replyBox.Text.Trim();
                 completed = true;
                 Close();
             };

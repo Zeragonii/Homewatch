@@ -189,3 +189,8 @@ Question and Alert windows run on their own UI thread, so the agent continues he
 - Agent verifies the server accepted the response and retries transient failures up to three times.
 - Generic command completion now also checks HTTP success instead of silently discarding failures.
 - Regression coverage confirms a Question reply is visible in the admin dashboard payload.
+
+
+## v0.3.6 reply capture fix
+
+- Question replies are copied out of the WinForms textbox before the dialog closes/disposes, preventing empty replies from being sent to the server.

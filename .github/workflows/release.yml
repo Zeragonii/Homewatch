@@ -28,7 +28,7 @@ jobs:
           if ($env:GITHUB_REF -like 'refs/tags/v*') {
             $version = $env:GITHUB_REF_NAME.Substring(1)
           } else {
-            $version = '0.3.5'
+            $version = '0.3.6'
           }
           "HOMEWATCH_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           Write-Host "Building HomeWatch Agent $version"

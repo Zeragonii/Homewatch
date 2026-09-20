@@ -100,7 +100,7 @@ def test_question_reply_round_trip_reaches_dashboard():
     device_id=str(uuid.uuid4())
     token='reply-test-token'
     with SessionLocal() as db:
-        db.add(Device(id=device_id,child_id=child_id,name='Reply Test',installation_id=str(uuid.uuid4()),token_hash=sha256_text(token),hostname='TEST-PC',os_version='Windows',agent_version='0.3.5'))
+        db.add(Device(id=device_id,child_id=child_id,name='Reply Test',installation_id=str(uuid.uuid4()),token_hash=sha256_text(token),hostname='TEST-PC',os_version='Windows',agent_version='0.3.6'))
         db.commit()
 
     payload=json.dumps({'type':'question','text':'Are you there?'})
