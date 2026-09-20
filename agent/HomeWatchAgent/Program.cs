@@ -239,8 +239,16 @@ public sealed class AgentContext : ApplicationContext
             {
                 if (cmd.Kind == "message")
                 {
-                    MessageBox.Show(cmd.Payload, "Message from parent", MessageBoxButtons.OK, MessageBoxIcon.Information, MessageBoxDefaultButton.Button1, MessageBoxOptions.DefaultDesktopOnly);
-                    await CompleteAsync(cmd.Id, "shown");
+                    var message = ParseMessagePayload(cmd.Payload);
+                    if (message.Type == "notify")
+                    {
+                        tray.ShowBalloonTip(8000, "HomeWatch · Message", message.Text, ToolTipIcon.Info);
+                        await CompleteAsync(cmd.Id, "notification delivered");
+                    }
+                    else
+                    {
+                        _ = HandleInteractiveMessageAsync(cmd.Id, message);
+                    }
                 }
                 else if (cmd.Kind == "screenshot") await ScreenshotAsync(cmd.Id);
                 else if (cmd.Kind == "check_update") await CheckUpdateAsync(true, cmd.Id);
@@ -256,6 +264,46 @@ public sealed class AgentContext : ApplicationContext
                 Log($"Command {cmd.Kind} failed: {ex.Message}");
                 try { await CompleteAsync(cmd.Id, $"failed: {ex.Message}"); } catch { }
             }
+        }
+    }
+
+    MessagePayload ParseMessagePayload(string payload)
+    {
+        try
+        {
+            var parsed = JsonSerializer.Deserialize<MessagePayload>(payload, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+            if (parsed is not null && !string.IsNullOrWhiteSpace(parsed.Text) && parsed.Type is "notify" or "question" or "alert") return parsed;
+        }
+        catch { }
+        return new MessagePayload { Type = "notify", Text = payload ?? "" };
+    }
+
+    Task HandleInteractiveMessageAsync(int commandId, MessagePayload message)
+    {
+        var tcs = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var thread = new Thread(() =>
+        {
+            try
+            {
+                using var form = new HomeWatchMessageForm(message.Type, message.Text);
+                Application.Run(form);
+                tcs.TrySetResult(message.Type == "question" ? $"Reply: {form.ResponseText}" : "Acknowledged");
+            }
+            catch (Exception ex) { tcs.TrySetException(ex); }
+        });
+        thread.IsBackground = true;
+        thread.SetApartmentState(ApartmentState.STA);
+        thread.Start();
+        return CompleteInteractiveMessageWhenReadyAsync(commandId, tcs.Task);
+    }
+
+    async Task CompleteInteractiveMessageWhenReadyAsync(int commandId, Task<string> resultTask)
+    {
+        try { await CompleteAsync(commandId, await resultTask); }
+        catch (Exception ex)
+        {
+            Log($"Interactive message {commandId} failed: {ex.Message}");
+            try { await CompleteAsync(commandId, $"failed: {ex.Message}"); } catch { }
         }
     }
 
@@ -421,9 +469,95 @@ public sealed class AgentContext : ApplicationContext
 }
 
 public record AgentCommand(int Id, string Kind, string Payload);
+public sealed class MessagePayload { public string Type { get; set; } = "notify"; public string Text { get; set; } = ""; }
 public sealed class PolicyState { public bool Enabled { get; set; } public string Status { get; set; } = ""; public bool Blocked { get; set; } public string Reason { get; set; } = ""; public int? RemainingSeconds { get; set; } public PolicyAppState? App { get; set; } }
 public sealed class PolicyAppState { public string ProcessName { get; set; } = ""; public bool Blocked { get; set; } public int UsedSeconds { get; set; } public int LimitSeconds { get; set; } }
 public sealed class UpdateManifest { public bool Available { get; set; } public string Version { get; set; } = ""; public string Url { get; set; } = ""; public string Sha256 { get; set; } = ""; }
+
+public sealed class HomeWatchMessageForm : Form
+{
+    readonly TextBox? replyBox;
+    bool completed;
+    public string ResponseText => replyBox?.Text.Trim() ?? "";
+
+    public HomeWatchMessageForm(string type, string message)
+    {
+        var isQuestion = type == "question";
+        var accent = isQuestion ? Color.FromArgb(142, 93, 223) : Color.FromArgb(225, 118, 54);
+        var surface = Color.FromArgb(22, 29, 43);
+        var panel = Color.FromArgb(31, 41, 58);
+        var text = Color.FromArgb(238, 243, 251);
+        var muted = Color.FromArgb(166, 177, 195);
+
+        Text = isQuestion ? "HomeWatch · Question" : "HomeWatch · Alert";
+        Width = 560; Height = isQuestion ? 360 : 300;
+        MinimumSize = new Size(480, isQuestion ? 330 : 280);
+        StartPosition = FormStartPosition.CenterScreen;
+        BackColor = surface; ForeColor = text;
+        Font = new Font("Segoe UI", 10F);
+        TopMost = true; ShowInTaskbar = true; ControlBox = false;
+        FormBorderStyle = FormBorderStyle.FixedDialog;
+
+        var accentBar = new Panel { Dock = DockStyle.Top, Height = 6, BackColor = accent };
+        var title = new Label
+        {
+            Text = isQuestion ? "QUESTION FROM PARENT" : "IMPORTANT ALERT",
+            Dock = DockStyle.Top, Height = 46, Padding = new Padding(22, 16, 22, 0),
+            Font = new Font("Segoe UI Semibold", 11F, FontStyle.Bold), ForeColor = accent
+        };
+        var body = new Label
+        {
+            Text = message, Dock = DockStyle.Top, Height = isQuestion ? 112 : 132,
+            Padding = new Padding(22, 14, 22, 8), Font = new Font("Segoe UI", 11F),
+            ForeColor = text, AutoEllipsis = true
+        };
+
+        var footer = new Panel { Dock = DockStyle.Fill, Padding = new Padding(22, 8, 22, 20), BackColor = panel };
+        var button = new Button
+        {
+            Text = isQuestion ? "Send reply" : "Acknowledge", Height = 42, Dock = DockStyle.Bottom,
+            BackColor = accent, ForeColor = Color.White, FlatStyle = FlatStyle.Flat,
+            Font = new Font("Segoe UI Semibold", 10F, FontStyle.Bold), Cursor = Cursors.Hand
+        };
+        button.FlatAppearance.BorderSize = 0;
+
+        if (isQuestion)
+        {
+            var prompt = new Label { Text = "Reply", Dock = DockStyle.Top, Height = 28, ForeColor = muted };
+            replyBox = new TextBox
+            {
+                Dock = DockStyle.Top, Height = 62, Multiline = true, MaxLength = 1000,
+                BackColor = Color.FromArgb(13, 21, 34), ForeColor = text, BorderStyle = BorderStyle.FixedSingle
+            };
+            footer.Controls.Add(button); footer.Controls.Add(replyBox); footer.Controls.Add(prompt);
+            AcceptButton = button;
+            button.Click += (_, _) =>
+            {
+                if (string.IsNullOrWhiteSpace(replyBox.Text))
+                {
+                    System.Media.SystemSounds.Exclamation.Play();
+                    replyBox.Focus(); return;
+                }
+                completed = true; Close();
+            };
+        }
+        else
+        {
+            var note = new Label
+            {
+                Text = "Please acknowledge this message to continue.", Dock = DockStyle.Top,
+                Height = 36, ForeColor = muted
+            };
+            footer.Controls.Add(button); footer.Controls.Add(note);
+            AcceptButton = button;
+            button.Click += (_, _) => { completed = true; Close(); };
+        }
+
+        FormClosing += (_, e) => { if (!completed) e.Cancel = true; };
+        Controls.Add(footer); Controls.Add(body); Controls.Add(title); Controls.Add(accentBar);
+        Shown += (_, _) => { Activate(); BringToFront(); if (isQuestion) replyBox?.Focus(); };
+    }
+}
 
 public sealed class ServerSetupForm : Form
 {

@@ -164,3 +164,13 @@ The Screen time menu adds child-level policies shared across all enrolled device
 - automatic closing of an application whose specific allowance is exhausted.
 
 Set `FAMILY_TIMEZONE` (default `Europe/London`) so schedules and day boundaries match the household. Screen-time enforcement requires the v0.3 agent; older agents continue monitoring but do not enforce these policies.
+
+## v0.3.3 typed messaging
+
+Parent messages now support three delivery modes:
+
+- **Notify** — a normal dismissible Windows notification.
+- **Question** — a styled HomeWatch dialog that requires a non-empty reply before it can close. The reply is returned to the server and shown in device command/message history.
+- **Alert** — a styled HomeWatch dialog that requires explicit acknowledgement before it can close. The acknowledgement is returned to the server and shown in device command/message history.
+
+Question and Alert windows run on their own UI thread, so the agent continues heartbeats, activity tracking, policy enforcement, and update checks while a response is pending.

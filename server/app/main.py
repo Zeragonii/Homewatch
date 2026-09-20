@@ -590,6 +590,19 @@ def reassign_device_child(device_id: str, body: DeviceAssignmentBody, db: Sessio
 def create_command(device_id: str, body: CommandBody, db: Session = Depends(db_session)):
     if body.kind not in {"message", "screenshot", "check_update", "lock", "logoff", "restart", "shutdown", "close_app"}:
         raise HTTPException(400, "Unsupported command")
+    if body.kind == "message":
+        if len(body.payload) > 5000:
+            raise HTTPException(400, "Message payload too large")
+        try:
+            message = json.loads(body.payload)
+            message_type = str(message.get("type", "notify")).lower()
+            message_text = str(message.get("text", "")).strip()
+            if message_type not in {"notify", "question", "alert"}:
+                raise ValueError
+            if not message_text or len(message_text) > 2000:
+                raise ValueError
+        except Exception:
+            raise HTTPException(400, "Message payload must contain a valid type and non-empty text")
     if body.kind == "close_app":
         target = body.payload.strip()
         if not target or len(target) > 255:

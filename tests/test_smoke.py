@@ -61,7 +61,7 @@ def test_device_can_be_reassigned_without_changing_identity():
     b=client.post('/api/children',json={'name':'Child B '+uuid.uuid4().hex[:6]}).json()['id']
     device_id=str(uuid.uuid4())
     with SessionLocal() as db:
-        db.add(Device(id=device_id,child_id=a,name='Reassign Test',installation_id=str(uuid.uuid4()),token_hash=sha256_text('token'),hostname='TEST-PC',os_version='Windows',agent_version='0.3.1'))
+        db.add(Device(id=device_id,child_id=a,name='Reassign Test',installation_id=str(uuid.uuid4()),token_hash=sha256_text('token'),hostname='TEST-PC',os_version='Windows',agent_version='0.3.3'))
         db.commit()
     r=client.put(f'/api/devices/{device_id}/child',json={'child_id':b})
     assert r.status_code==200
@@ -71,3 +71,22 @@ def test_device_can_be_reassigned_without_changing_identity():
         device=db.get(Device,device_id)
         assert device is not None
         assert device.child_id==b
+
+
+def test_typed_messages_are_validated_and_queued():
+    import json, uuid
+    from server.app.main import SessionLocal, Device, sha256_text
+
+    child_id=client.post('/api/children',json={'name':'Message Kid '+uuid.uuid4().hex[:6]}).json()['id']
+    device_id=str(uuid.uuid4())
+    with SessionLocal() as db:
+        db.add(Device(id=device_id,child_id=child_id,name='Message Test',installation_id=str(uuid.uuid4()),token_hash=sha256_text('token'),hostname='TEST-PC',os_version='Windows',agent_version='0.3.3'))
+        db.commit()
+
+    for message_type in ('notify','question','alert'):
+        payload=json.dumps({'type':message_type,'text':f'{message_type} test'})
+        r=client.post(f'/api/devices/{device_id}/commands',json={'kind':'message','payload':payload})
+        assert r.status_code==200
+
+    bad=client.post(f'/api/devices/{device_id}/commands',json={'kind':'message','payload':json.dumps({'type':'nope','text':'bad'})})
+    assert bad.status_code==400
