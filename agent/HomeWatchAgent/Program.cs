@@ -287,7 +287,7 @@ public sealed class AgentContext : ApplicationContext
             {
                 using var form = new HomeWatchMessageForm(message.Type, message.Text);
                 Application.Run(form);
-                tcs.TrySetResult(message.Type == "question" ? $"Reply: {form.ResponseText}" : "Acknowledged");
+                tcs.TrySetResult(message.Type == "question" ? form.ResponseText : "");
             }
             catch (Exception ex) { tcs.TrySetException(ex); }
         });
@@ -299,12 +299,49 @@ public sealed class AgentContext : ApplicationContext
 
     async Task CompleteInteractiveMessageWhenReadyAsync(int commandId, Task<string> resultTask)
     {
-        try { await CompleteAsync(commandId, await resultTask); }
+        try
+        {
+            var reply = await resultTask;
+            await SendMessageResponseAsync(commandId, reply);
+        }
         catch (Exception ex)
         {
             Log($"Interactive message {commandId} failed: {ex.Message}");
             try { await CompleteAsync(commandId, $"failed: {ex.Message}"); } catch { }
         }
+    }
+
+    async Task SendMessageResponseAsync(int commandId, string reply)
+    {
+        var isReply = !string.IsNullOrWhiteSpace(reply);
+        Exception? lastError = null;
+        for (var attempt = 1; attempt <= 3; attempt++)
+        {
+            try
+            {
+                using var content = JsonContent.Create(new
+                {
+                    response_type = isReply ? "reply" : "acknowledge",
+                    text = isReply ? reply : ""
+                });
+                using var r = Request(HttpMethod.Post, $"agent/messages/{commandId}/respond", content);
+                using var response = await http.SendAsync(r);
+                if (!response.IsSuccessStatusCode)
+                {
+                    var body = await response.Content.ReadAsStringAsync();
+                    throw new InvalidOperationException($"server rejected message response: HTTP {(int)response.StatusCode} {body}");
+                }
+                Log(isReply ? $"Question {commandId} reply accepted by server" : $"Alert {commandId} acknowledgement accepted by server");
+                return;
+            }
+            catch (Exception ex)
+            {
+                lastError = ex;
+                Log($"Message response {commandId} attempt {attempt}/3 failed: {ex.Message}");
+                if (attempt < 3) await Task.Delay(TimeSpan.FromSeconds(attempt * 2));
+            }
+        }
+        throw new InvalidOperationException($"message response failed after 3 attempts: {lastError?.Message}", lastError);
     }
 
     async Task LockAsync(int id)
@@ -363,7 +400,12 @@ public sealed class AgentContext : ApplicationContext
     {
         using var content = JsonContent.Create(new { result });
         using var r = Request(HttpMethod.Post, $"agent/commands/{id}/complete", content);
-        await http.SendAsync(r);
+        using var response = await http.SendAsync(r);
+        if (!response.IsSuccessStatusCode)
+        {
+            var body = await response.Content.ReadAsStringAsync();
+            throw new InvalidOperationException($"server rejected command completion: HTTP {(int)response.StatusCode} {body}");
+        }
     }
 
     async Task ScreenshotAsync(int id)

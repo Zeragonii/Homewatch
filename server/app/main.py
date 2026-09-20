@@ -265,6 +265,11 @@ class CommandResultBody(BaseModel):
     result: str = ""
 
 
+class MessageResponseBody(BaseModel):
+    response_type: str
+    text: str = ""
+
+
 class ReleaseBody(BaseModel):
     version: str
     url: str
@@ -733,6 +738,39 @@ def command_complete(command_id: int, body: CommandResultBody, device: Device = 
     cmd.status = "complete"; cmd.result = body.result[:2000]; cmd.completed_at = datetime.now(timezone.utc)
     db.commit()
     return {"ok": True}
+
+
+
+
+@app.post("/agent/messages/{command_id}/respond")
+def message_respond(command_id: int, body: MessageResponseBody, device: Device = Depends(agent_auth), db: Session = Depends(db_session)):
+    cmd = db.get(Command, command_id)
+    if not cmd or cmd.device_id != device.id or cmd.kind != "message":
+        raise HTTPException(404, "Message command not found")
+    try:
+        payload = json.loads(cmd.payload)
+        message_type = str(payload.get("type", "notify")).lower()
+    except Exception:
+        message_type = "notify"
+    if message_type not in {"question", "alert"}:
+        raise HTTPException(400, "Message does not accept a response")
+    response_type = body.response_type.strip().lower()
+    if message_type == "question":
+        if response_type != "reply":
+            raise HTTPException(400, "Question requires a reply")
+        text = body.text.strip()
+        if not text:
+            raise HTTPException(400, "Reply cannot be empty")
+        result = f"Reply: {text}"[:2000]
+    else:
+        if response_type != "acknowledge":
+            raise HTTPException(400, "Alert requires acknowledgement")
+        result = "Acknowledged"
+    cmd.status = "complete"
+    cmd.result = result
+    cmd.completed_at = datetime.now(timezone.utc)
+    db.commit()
+    return {"ok": True, "result": result}
 
 
 @app.post("/agent/commands/{command_id}/screenshot")

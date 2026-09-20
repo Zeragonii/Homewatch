@@ -181,3 +181,11 @@ Question and Alert windows run on their own UI thread, so the agent continues he
 - Question and Alert dialogs explicitly force themselves foreground/topmost when shown.
 - Dialog layout uses fixed table rows so message text, reply controls and action buttons cannot overlap at different DPI/font scaling.
 - Long messages use a scrollable read-only message area.
+
+
+## v0.3.5 reliable interactive replies
+
+- Question replies and Alert acknowledgements use a dedicated authenticated response endpoint.
+- Agent verifies the server accepted the response and retries transient failures up to three times.
+- Generic command completion now also checks HTTP success instead of silently discarding failures.
+- Regression coverage confirms a Question reply is visible in the admin dashboard payload.

@@ -90,3 +90,36 @@ def test_typed_messages_are_validated_and_queued():
 
     bad=client.post(f'/api/devices/{device_id}/commands',json={'kind':'message','payload':json.dumps({'type':'nope','text':'bad'})})
     assert bad.status_code==400
+
+
+def test_question_reply_round_trip_reaches_dashboard():
+    import json, uuid
+    from server.app.main import SessionLocal, Device, Command, sha256_text
+
+    child_id=client.post('/api/children',json={'name':'Reply Kid '+uuid.uuid4().hex[:6]}).json()['id']
+    device_id=str(uuid.uuid4())
+    token='reply-test-token'
+    with SessionLocal() as db:
+        db.add(Device(id=device_id,child_id=child_id,name='Reply Test',installation_id=str(uuid.uuid4()),token_hash=sha256_text(token),hostname='TEST-PC',os_version='Windows',agent_version='0.3.5'))
+        db.commit()
+
+    payload=json.dumps({'type':'question','text':'Are you there?'})
+    queued=client.post(f'/api/devices/{device_id}/commands',json={'kind':'message','payload':payload})
+    assert queued.status_code==200
+    command_id=queued.json()['id']
+
+    headers={'X-Device-Id':device_id,'Authorization':f'Bearer {token}'}
+    polled=client.get('/agent/commands',headers=headers)
+    assert polled.status_code==200
+    assert any(c['id']==command_id for c in polled.json())
+
+    response=client.post(f'/agent/messages/{command_id}/respond',headers=headers,json={'response_type':'reply','text':'Yes, one minute'})
+    assert response.status_code==200
+    assert response.json()['result']=='Reply: Yes, one minute'
+
+    dashboard=client.get('/api/dashboard')
+    assert dashboard.status_code==200
+    device=next(d for d in dashboard.json()['devices'] if d['id']==device_id)
+    message=next(c for c in device['commands'] if c['id']==command_id)
+    assert message['status']=='complete'
+    assert message['result']=='Reply: Yes, one minute'
