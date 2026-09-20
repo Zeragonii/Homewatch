@@ -174,3 +174,10 @@ Parent messages now support three delivery modes:
 - **Alert** — a styled HomeWatch dialog that requires explicit acknowledgement before it can close. The acknowledgement is returned to the server and shown in device command/message history.
 
 Question and Alert windows run on their own UI thread, so the agent continues heartbeats, activity tracking, policy enforcement, and update checks while a response is pending.
+
+
+## v0.3.4 message dialog polish
+
+- Question and Alert dialogs explicitly force themselves foreground/topmost when shown.
+- Dialog layout uses fixed table rows so message text, reply controls and action buttons cannot overlap at different DPI/font scaling.
+- Long messages use a scrollable read-only message area.

@@ -477,7 +477,9 @@ public sealed class UpdateManifest { public bool Available { get; set; } public 
 public sealed class HomeWatchMessageForm : Form
 {
     readonly TextBox? replyBox;
+    readonly System.Windows.Forms.Timer foregroundRetry = new() { Interval = 350 };
     bool completed;
+    int foregroundAttempts;
     public string ResponseText => replyBox?.Text.Trim() ?? "";
 
     public HomeWatchMessageForm(string type, string message)
@@ -486,77 +488,220 @@ public sealed class HomeWatchMessageForm : Form
         var accent = isQuestion ? Color.FromArgb(142, 93, 223) : Color.FromArgb(225, 118, 54);
         var surface = Color.FromArgb(22, 29, 43);
         var panel = Color.FromArgb(31, 41, 58);
+        var input = Color.FromArgb(13, 21, 34);
         var text = Color.FromArgb(238, 243, 251);
         var muted = Color.FromArgb(166, 177, 195);
 
         Text = isQuestion ? "HomeWatch · Question" : "HomeWatch · Alert";
-        Width = 560; Height = isQuestion ? 360 : 300;
-        MinimumSize = new Size(480, isQuestion ? 330 : 280);
+        Width = 600;
+        Height = isQuestion ? 430 : 360;
+        MinimumSize = new Size(520, isQuestion ? 400 : 330);
         StartPosition = FormStartPosition.CenterScreen;
-        BackColor = surface; ForeColor = text;
+        BackColor = surface;
+        ForeColor = text;
         Font = new Font("Segoe UI", 10F);
-        TopMost = true; ShowInTaskbar = true; ControlBox = false;
+        TopMost = true;
+        ShowInTaskbar = true;
+        ControlBox = false;
         FormBorderStyle = FormBorderStyle.FixedDialog;
+        MaximizeBox = false;
+        MinimizeBox = false;
 
-        var accentBar = new Panel { Dock = DockStyle.Top, Height = 6, BackColor = accent };
+        var root = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            BackColor = surface,
+            ColumnCount = 1,
+            RowCount = 4,
+            Margin = Padding.Empty,
+            Padding = Padding.Empty
+        };
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 6F));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 54F));
+        root.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, isQuestion ? 156F : 104F));
+
+        var accentBar = new Panel { Dock = DockStyle.Fill, BackColor = accent, Margin = Padding.Empty };
         var title = new Label
         {
             Text = isQuestion ? "QUESTION FROM PARENT" : "IMPORTANT ALERT",
-            Dock = DockStyle.Top, Height = 46, Padding = new Padding(22, 16, 22, 0),
-            Font = new Font("Segoe UI Semibold", 11F, FontStyle.Bold), ForeColor = accent
-        };
-        var body = new Label
-        {
-            Text = message, Dock = DockStyle.Top, Height = isQuestion ? 112 : 132,
-            Padding = new Padding(22, 14, 22, 8), Font = new Font("Segoe UI", 11F),
-            ForeColor = text, AutoEllipsis = true
+            Dock = DockStyle.Fill,
+            Padding = new Padding(24, 17, 24, 0),
+            Font = new Font("Segoe UI Semibold", 11F, FontStyle.Bold),
+            ForeColor = accent,
+            BackColor = surface,
+            Margin = Padding.Empty
         };
 
-        var footer = new Panel { Dock = DockStyle.Fill, Padding = new Padding(22, 8, 22, 20), BackColor = panel };
+        var messagePanel = new Panel
+        {
+            Dock = DockStyle.Fill,
+            Padding = new Padding(24, 12, 24, 16),
+            BackColor = surface,
+            Margin = Padding.Empty
+        };
+        var body = new TextBox
+        {
+            Text = message,
+            Dock = DockStyle.Fill,
+            Multiline = true,
+            ReadOnly = true,
+            BorderStyle = BorderStyle.None,
+            BackColor = surface,
+            ForeColor = text,
+            Font = new Font("Segoe UI", 11F),
+            ScrollBars = ScrollBars.Vertical,
+            TabStop = false,
+            ShortcutsEnabled = true
+        };
+        messagePanel.Controls.Add(body);
+
+        var footer = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 1,
+            BackColor = panel,
+            Padding = new Padding(24, 12, 24, 18),
+            Margin = Padding.Empty
+        };
+
         var button = new Button
         {
-            Text = isQuestion ? "Send reply" : "Acknowledge", Height = 42, Dock = DockStyle.Bottom,
-            BackColor = accent, ForeColor = Color.White, FlatStyle = FlatStyle.Flat,
-            Font = new Font("Segoe UI Semibold", 10F, FontStyle.Bold), Cursor = Cursors.Hand
+            Text = isQuestion ? "Send reply" : "Acknowledge",
+            Dock = DockStyle.Fill,
+            BackColor = accent,
+            ForeColor = Color.White,
+            FlatStyle = FlatStyle.Flat,
+            Font = new Font("Segoe UI Semibold", 10F, FontStyle.Bold),
+            Cursor = Cursors.Hand,
+            Margin = new Padding(0)
         };
         button.FlatAppearance.BorderSize = 0;
 
         if (isQuestion)
         {
-            var prompt = new Label { Text = "Reply", Dock = DockStyle.Top, Height = 28, ForeColor = muted };
+            footer.RowCount = 3;
+            footer.RowStyles.Add(new RowStyle(SizeType.Absolute, 26F));
+            footer.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
+            footer.RowStyles.Add(new RowStyle(SizeType.Absolute, 46F));
+
+            var prompt = new Label
+            {
+                Text = "Reply",
+                Dock = DockStyle.Fill,
+                ForeColor = muted,
+                TextAlign = ContentAlignment.MiddleLeft,
+                Margin = Padding.Empty
+            };
             replyBox = new TextBox
             {
-                Dock = DockStyle.Top, Height = 62, Multiline = true, MaxLength = 1000,
-                BackColor = Color.FromArgb(13, 21, 34), ForeColor = text, BorderStyle = BorderStyle.FixedSingle
+                Dock = DockStyle.Fill,
+                Multiline = true,
+                MaxLength = 1000,
+                BackColor = input,
+                ForeColor = text,
+                BorderStyle = BorderStyle.FixedSingle,
+                Font = new Font("Segoe UI", 10.5F),
+                Margin = new Padding(0, 0, 0, 10)
             };
-            footer.Controls.Add(button); footer.Controls.Add(replyBox); footer.Controls.Add(prompt);
+            footer.Controls.Add(prompt, 0, 0);
+            footer.Controls.Add(replyBox, 0, 1);
+            footer.Controls.Add(button, 0, 2);
             AcceptButton = button;
             button.Click += (_, _) =>
             {
                 if (string.IsNullOrWhiteSpace(replyBox.Text))
                 {
                     System.Media.SystemSounds.Exclamation.Play();
-                    replyBox.Focus(); return;
+                    ForceForeground();
+                    replyBox.Focus();
+                    return;
                 }
-                completed = true; Close();
+                completed = true;
+                Close();
             };
         }
         else
         {
+            footer.RowCount = 2;
+            footer.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
+            footer.RowStyles.Add(new RowStyle(SizeType.Absolute, 46F));
+
             var note = new Label
             {
-                Text = "Please acknowledge this message to continue.", Dock = DockStyle.Top,
-                Height = 36, ForeColor = muted
+                Text = "Please acknowledge this message to continue.",
+                Dock = DockStyle.Fill,
+                ForeColor = muted,
+                TextAlign = ContentAlignment.MiddleLeft,
+                Margin = Padding.Empty
             };
-            footer.Controls.Add(button); footer.Controls.Add(note);
+            footer.Controls.Add(note, 0, 0);
+            footer.Controls.Add(button, 0, 1);
             AcceptButton = button;
             button.Click += (_, _) => { completed = true; Close(); };
         }
 
+        root.Controls.Add(accentBar, 0, 0);
+        root.Controls.Add(title, 0, 1);
+        root.Controls.Add(messagePanel, 0, 2);
+        root.Controls.Add(footer, 0, 3);
+        Controls.Add(root);
+
         FormClosing += (_, e) => { if (!completed) e.Cancel = true; };
-        Controls.Add(footer); Controls.Add(body); Controls.Add(title); Controls.Add(accentBar);
-        Shown += (_, _) => { Activate(); BringToFront(); if (isQuestion) replyBox?.Focus(); };
+        Shown += (_, _) =>
+        {
+            ForceForeground();
+            if (isQuestion) replyBox?.Focus();
+            foregroundRetry.Start();
+        };
+        Activated += (_, _) => NativeMethods.PinTopmost(Handle);
+        foregroundRetry.Tick += (_, _) =>
+        {
+            foregroundAttempts++;
+            ForceForeground();
+            if (foregroundAttempts >= 4) foregroundRetry.Stop();
+        };
     }
+
+    void ForceForeground()
+    {
+        if (!IsHandleCreated) return;
+        NativeMethods.PinTopmost(Handle);
+        NativeMethods.ShowWindow(Handle, NativeMethods.SW_RESTORE);
+        NativeMethods.SetForegroundWindow(Handle);
+        Activate();
+        BringToFront();
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing) foregroundRetry.Dispose();
+        base.Dispose(disposing);
+    }
+}
+
+internal static class NativeMethods
+{
+    internal const int SW_RESTORE = 9;
+    static readonly IntPtr HWND_TOPMOST = new(-1);
+    const uint SWP_NOMOVE = 0x0002;
+    const uint SWP_NOSIZE = 0x0001;
+    const uint SWP_SHOWWINDOW = 0x0040;
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool SetForegroundWindow(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
+
+    internal static void PinTopmost(IntPtr hWnd) =>
+        SetWindowPos(hWnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
 }
 
 public sealed class ServerSetupForm : Form
