@@ -28,7 +28,7 @@ jobs:
           if ($env:GITHUB_REF -like 'refs/tags/v*') {
             $version = $env:GITHUB_REF_NAME.Substring(1)
           } else {
-            $version = '0.3.8'
+            $version = '0.3.9'
           }
           "HOMEWATCH_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           Write-Host "Building HomeWatch Agent $version"
@@ -45,9 +45,12 @@ jobs:
         shell: pwsh
         run: |
           dotnet publish agent/HomeWatchAgent/HomeWatchAgent.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:Version=$env:HOMEWATCH_VERSION -o out/agent
+          if ($LASTEXITCODE -ne 0) { throw "HomeWatchAgent publish failed ($LASTEXITCODE)" }
           dotnet publish agent/HomeWatchService/HomeWatchService.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:Version=$env:HOMEWATCH_VERSION -o out/service
+          if ($LASTEXITCODE -ne 0) { throw "HomeWatchService publish failed ($LASTEXITCODE)" }
           Copy-Item out/service/HomeWatchService.exe out/agent/HomeWatchService.exe -Force
           dotnet publish agent/HomeWatchUpdater/HomeWatchUpdater.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:Version=$env:HOMEWATCH_VERSION -o out/updater
+          if ($LASTEXITCODE -ne 0) { throw "HomeWatchUpdater publish failed ($LASTEXITCODE)" }
           Copy-Item out/updater/HomeWatchUpdater.exe out/agent/HomeWatchUpdater.exe -Force
           # Add Authenticode signing here once a signing certificate is configured.
           Compress-Archive -Path out/agent/* -DestinationPath HomeWatch-Agent-win-x64.zip -Force

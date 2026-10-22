@@ -9,16 +9,6 @@ using Microsoft.Extensions.Logging;
 
 // SECURITY BOUNDARY: no IPC commands are interpreted as programs, URLs, or paths.
 // Update source and installed binary names are fixed by this elevated executable.
-internal static class Settings
-{
-    public const string ServiceName = "HomeWatchUpdaterService";
-    public const string Api = "https://api.github.com/repos/Zeragonii/Homewatch/releases/latest";
-    public const string ReleasePrefix = "https://github.com/Zeragonii/Homewatch/releases/download/";
-    public static readonly string State = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "HomeWatch", ".updates");
-    public static readonly string InstallDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "HomeWatch");
-    public static readonly string[] Allowed = { "HomeWatchAgent.exe", "HomeWatchUpdater.exe", "HomeWatchService.exe" };
-}
-
 if (args.Length == 3 && args[0] == "--apply" && args[1] == "--service-update")
 {
     // Only our service launches this; never accept an arbitrary source path.
@@ -30,6 +20,16 @@ var builder = Host.CreateApplicationBuilder(args);
 builder.Services.AddWindowsService(o => o.ServiceName = Settings.ServiceName);
 builder.Services.AddHostedService<ReleaseWorker>();
 await builder.Build().RunAsync();
+
+internal static class Settings
+{
+    public const string ServiceName = "HomeWatchUpdaterService";
+    public const string Api = "https://api.github.com/repos/Zeragonii/Homewatch/releases/latest";
+    public const string ReleasePrefix = "https://github.com/Zeragonii/Homewatch/releases/download/";
+    public static readonly string State = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "HomeWatch", ".updates");
+    public static readonly string InstallDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "HomeWatch");
+    public static readonly string[] Allowed = { "HomeWatchAgent.exe", "HomeWatchUpdater.exe", "HomeWatchService.exe" };
+}
 
 internal sealed class ReleaseWorker(ILogger<ReleaseWorker> log) : BackgroundService
 {
