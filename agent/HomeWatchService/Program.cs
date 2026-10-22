@@ -111,10 +111,12 @@ internal sealed class ReleaseWorker(ILogger<ReleaseWorker> log) : BackgroundServ
             // Helper is launched from protected Program Files, never the downloaded archive.
             var helper = Path.Combine(Settings.State, "apply-helper-" + Guid.NewGuid().ToString("N") + ".exe");
             File.Copy(Path.Combine(Settings.InstallDir, "HomeWatchService.exe"), helper);
-            Process.Start(new ProcessStartInfo(helper) {
+            using var updateProcess = Process.Start(new ProcessStartInfo(helper) {
                 ArgumentList = { "--apply", "--service-update", Path.GetFileName(stage) },
                 UseShellExecute = false, CreateNoWindow = true
-            }) ?? throw new IOException("Could not launch update helper");
+            });
+            if (updateProcess is null)
+                throw new IOException("Could not launch update helper");
             log.LogInformation("Staged {Tag}; handing off to privileged helper", tag);
         }
         catch { Directory.Delete(stage, true); throw; }
