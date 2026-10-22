@@ -194,3 +194,32 @@ Question and Alert windows run on their own UI thread, so the agent continues he
 ## v0.3.6 reply capture fix
 
 - Question replies are copied out of the WinForms textbox before the dialog closes/disposes, preventing empty replies from being sent to the server.
+
+
+## v0.3.7: Machine-wide agent install
+
+The new installer requires elevation and installs into `C:\Program Files\HomeWatch`.
+It registers a machine-wide HKLM Run entry: each Windows desktop user starts the
+agent when they sign in. The per-device enrolment record is now stored in
+`C:\ProgramData\HomeWatch\config.json`, shared across profiles; per-user logs
+remain under `%LOCALAPPDATA%\HomeWatch\agent.log`. Only the active local console
+session sends activity and polls messages/commands, to avoid stale sessions
+interfering after Fast User Switching.
+
+**Migration:** run the new installer from the *same administrator account*
+that ran the original per-user HomeWatch installation. It attempts to copy
+`%LOCALAPPDATA%\HomeWatch\config.json` into ProgramData if no machine config
+exists. Verify the ProgramData copy before deleting the old per-user config.
+If UAC requires entering another administrator's credentials, you may need
+to copy that original `config.json` manually into ProgramData.
+
+**Updater limitation:** Existing unprivileged self-updating cannot overwrite
+`Program Files`. Rather than quit and fail, the agent reports that a new
+version requires the administrator-run installer. A trusted privileged
+updater service is required to restore silent machine-wide updates.
+
+**Security note:** ProgramData's shared configuration must be writable by
+interactive users in this architecture, so local users can tamper with the
+client credentials/config. This is not a tamper-proof enforcement system.
+A privileged background service holding the credentials is the appropriate
+long-term architecture.

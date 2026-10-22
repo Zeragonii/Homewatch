@@ -33,7 +33,9 @@ public sealed class AgentConfig
 public sealed class AgentContext : ApplicationContext
 {
     static readonly string AgentVersion = GetAgentVersion();
-    readonly string dataDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "HomeWatch");
+    // Device credentials/identity are machine-wide; logs remain per Windows profile.
+    readonly string dataDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "HomeWatch");
+    readonly string logDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "HomeWatch");
     readonly HttpClient http = new() { Timeout = TimeSpan.FromSeconds(30) };
     readonly NotifyIcon tray;
     AgentConfig config = new();
@@ -51,6 +53,7 @@ public sealed class AgentContext : ApplicationContext
     public AgentContext()
     {
         Directory.CreateDirectory(dataDir);
+        Directory.CreateDirectory(logDir);
         tray = new NotifyIcon { Icon = SystemIcons.Shield, Visible = true, Text = "HomeWatch Agent" };
         var menu = new ContextMenuStrip();
         menu.Items.Add("Status", null, (_, _) => ShowStatus());
@@ -65,23 +68,38 @@ public sealed class AgentContext : ApplicationContext
             config.ServerUrl = setup.ServerUrl.TrimEnd('/'); SaveConfig();
         }
         http.BaseAddress = new Uri(config.ServerUrl.TrimEnd('/') + "/");
-        ConfigureAutostart();
+        // All-user autostart is provisioned by the elevated installer (HKLM Run).
+        // Don't create a per-user HKCU Run key here.
         _ = LoopAsync();
     }
 
     void LoadOrCreateConfig()
     {
         var path = Path.Combine(dataDir, "config.json");
+        // Migration fallback for a previously installed portable/per-user agent.
+        // The installer also attempts this migration while running as the original user.
+        var legacy = Path.Combine(logDir, "config.json");
+        if (!File.Exists(path) && File.Exists(legacy))
+        {
+            try { File.Copy(legacy, path, false); }
+            catch (IOException) { /* Another session may have migrated first. */ }
+        }
         if (File.Exists(path)) config = JsonSerializer.Deserialize<AgentConfig>(File.ReadAllText(path)) ?? new AgentConfig();
         SaveConfig();
     }
 
-    void SaveConfig() => File.WriteAllText(Path.Combine(dataDir, "config.json"), JsonSerializer.Serialize(config, new JsonSerializerOptions { WriteIndented = true }));
-
-    void ConfigureAutostart()
+    void SaveConfig()
     {
-        using var key = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run", true);
-        key?.SetValue("HomeWatchAgent", $"\"{Environment.ProcessPath}\"");
+        var path = Path.Combine(dataDir, "config.json");
+        File.WriteAllText(path, JsonSerializer.Serialize(config, new JsonSerializerOptions { WriteIndented = true }));
+    }
+
+    // Only the foreground console session reports activity and receives commands.
+    // Other users may remain signed in after Fast User Switching.
+    static bool IsActiveConsoleSession()
+    {
+        if (!ProcessIdToSessionId((uint)Environment.ProcessId, out var sessionId)) return false;
+        return sessionId == WTSGetActiveConsoleSessionId();
     }
 
     async Task LoopAsync()
@@ -90,6 +108,7 @@ public sealed class AgentContext : ApplicationContext
         {
             try
             {
+                if (!IsActiveConsoleSession()) { await Task.Delay(2000); continue; }
                 TrackForeground();
                 if (string.IsNullOrEmpty(config.DeviceId) || string.IsNullOrEmpty(config.DeviceToken)) await EnsureEnrolledAsync();
                 else
@@ -444,7 +463,21 @@ public sealed class AgentContext : ApplicationContext
             if (commandId.HasValue) await CompleteAsync(commandId.Value, "update rejected: SHA-256 mismatch");
             return;
         }
-        var zip = Path.Combine(dataDir, $"update-{m.Version}.zip"); await File.WriteAllBytesAsync(zip, bytes);
+        // A standard user cannot replace an all-users Program Files installation.
+        // Do not launch an updater which will fail after killing this agent.
+        try
+        {
+            var probe = Path.Combine(AppContext.BaseDirectory, $".homewatch-permission-{Guid.NewGuid():N}");
+            using (File.Create(probe)) { }
+            File.Delete(probe);
+        }
+        catch (UnauthorizedAccessException)
+        {
+            Log($"Update {m.Version} requires an administrator-run machine installer.");
+            if (commandId.HasValue) await CompleteAsync(commandId.Value, $"update {m.Version} requires admin installer (machine-wide install)");
+            return;
+        }
+        var zip = Path.Combine(logDir, $"update-{m.Version}.zip"); await File.WriteAllBytesAsync(zip, bytes);
         var installedUpdater = Path.Combine(AppContext.BaseDirectory, "HomeWatchUpdater.exe");
         if (!File.Exists(installedUpdater))
         {
@@ -478,7 +511,7 @@ public sealed class AgentContext : ApplicationContext
     {
         try
         {
-            var path = Path.Combine(dataDir, "agent.log");
+            var path = Path.Combine(logDir, "agent.log");
             if (File.Exists(path) && new FileInfo(path).Length > 2 * 1024 * 1024) File.Move(path, path + ".old", true);
             File.AppendAllText(path, $"{DateTime.Now:yyyy-MM-dd HH:mm:ss} {message}{Environment.NewLine}");
         }
@@ -503,6 +536,9 @@ public sealed class AgentContext : ApplicationContext
         try { return Process.GetProcessById((int)pid).ProcessName + ".exe"; } catch { return ""; }
     }
 
+    [DllImport("kernel32.dll")] static extern uint WTSGetActiveConsoleSessionId();
+    [DllImport("kernel32.dll", SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)]
+    static extern bool ProcessIdToSessionId(uint processId, out uint sessionId);
     [DllImport("user32.dll", SetLastError = true)] static extern bool LockWorkStation();
     [DllImport("user32.dll")] static extern bool GetLastInputInfo(ref LASTINPUTINFO plii);
     [DllImport("kernel32.dll")] static extern ulong GetTickCount64();

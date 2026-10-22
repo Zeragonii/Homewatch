@@ -1,7 +1,6 @@
 #ifndef MyAppVersion
-  #define MyAppVersion "0.1.5"
+  #define MyAppVersion "0.3.7"
 #endif
-
 #define MyAppName "HomeWatch Agent"
 #define MyAppPublisher "HomeWatch"
 #define MyAppExeName "HomeWatchAgent.exe"
@@ -11,11 +10,10 @@ AppId={{D2A3AD9D-E63B-4AA3-8A05-1B51DE721C77}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
-DefaultDirName={localappdata}\Programs\HomeWatch
+DefaultDirName={autopf}\HomeWatch
 DefaultGroupName=HomeWatch
 DisableProgramGroupPage=yes
-PrivilegesRequired=lowest
-PrivilegesRequiredOverridesAllowed=dialog
+PrivilegesRequired=admin
 OutputDir=..\..\out\installer
 OutputBaseFilename=HomeWatch-Agent-Setup-win-x64
 Compression=lzma2
@@ -26,27 +24,40 @@ UninstallDisplayIcon={app}\{#MyAppExeName}
 CloseApplications=yes
 RestartApplications=no
 
+[Dirs]
+; Shared device credentials are used by per-user UI agents. Access is necessary
+; for the per-user app but this is NOT tamper-resistant against local users.
+Name: "{commonappdata}\HomeWatch"; Permissions: users-modify
+
 [Files]
 Source: "..\..\out\agent\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
+[Registry]
+; Every interactive Windows user launches their own agent on sign-in.
+Root: HKLM; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "HomeWatchAgent"; ValueData: """{app}\{#MyAppExeName}"""; Flags: uninsdeletevalue
+; Remove older per-user autoruns for the account performing the upgrade.
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: none; ValueName: "HomeWatchAgent"; Flags: deletevalue
+
 [Icons]
-Name: "{group}\HomeWatch Agent"; Filename: "{app}\{#MyAppExeName}"
+Name: "{autoprograms}\HomeWatch Agent"; Filename: "{app}\{#MyAppExeName}"
 
 [Run]
 Filename: "{cmd}"; Parameters: "/C taskkill /IM HomeWatchAgent.exe /F >NUL 2>&1"; Flags: runhidden; StatusMsg: "Stopping existing HomeWatch Agent..."
-Filename: "{app}\{#MyAppExeName}"; Description: "Start HomeWatch Agent"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\{#MyAppExeName}"; Description: "Launch HomeWatch Agent for this Windows account"; Flags: nowait postinstall skipifsilent runasoriginaluser
 
 [UninstallRun]
 Filename: "{cmd}"; Parameters: "/C taskkill /IM HomeWatchAgent.exe /F >NUL 2>&1"; Flags: runhidden; RunOnceId: "StopHomeWatchAgent"
 
 [Code]
-procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+procedure CurStepChanged(CurStep: TSetupStep);
 var
-  RunKey: String;
+  OldConfig, NewConfig: String;
 begin
-  if CurUninstallStep = usUninstall then
+  if CurStep = ssPostInstall then
   begin
-    RunKey := 'Software\Microsoft\Windows\CurrentVersion\Run';
-    RegDeleteValue(HKEY_CURRENT_USER, RunKey, 'HomeWatchAgent');
+    NewConfig := ExpandConstant('{commonappdata}\HomeWatch\config.json');
+    OldConfig := ExpandConstant('{localappdata}\HomeWatch\config.json');
+    if (not FileExists(NewConfig)) and FileExists(OldConfig) then
+      FileCopy(OldConfig, NewConfig, False);
   end;
 end;
