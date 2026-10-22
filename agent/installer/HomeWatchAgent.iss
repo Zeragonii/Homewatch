@@ -1,5 +1,5 @@
 #ifndef MyAppVersion
-  #define MyAppVersion "0.3.7"
+  #define MyAppVersion "0.3.8"
 #endif
 #define MyAppName "HomeWatch Agent"
 #define MyAppPublisher "HomeWatch"
@@ -28,9 +28,16 @@ RestartApplications=no
 ; Shared device credentials are used by per-user UI agents. Access is necessary
 ; for the per-user app but this is NOT tamper-resistant against local users.
 Name: "{commonappdata}\HomeWatch"; Permissions: users-modify
+; Update staging is kept under Program Files to inherit protected system ACLs.
+Name: "{app}\.updates"
 
 [Files]
 Source: "..\..\out\agent\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+
+[Run]
+Filename: "{sys}\sc.exe"; Parameters: "create HomeWatchUpdaterService binPath= ""{app}\HomeWatchService.exe"" start= auto"; Flags: runhidden waituntilterminated; Check: not ServiceInstalled
+Filename: "{sys}\sc.exe"; Parameters: "start HomeWatchUpdaterService"; Flags: runhidden waituntilterminated
+Filename: "{app}\{#MyAppExeName}"; Description: "Launch HomeWatch Agent for this Windows account"; Flags: nowait postinstall skipifsilent runasoriginaluser
 
 [Registry]
 ; Every interactive Windows user launches their own agent on sign-in.
@@ -41,18 +48,28 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: 
 [Icons]
 Name: "{autoprograms}\HomeWatch Agent"; Filename: "{app}\{#MyAppExeName}"
 
-[Run]
-Filename: "{cmd}"; Parameters: "/C taskkill /IM HomeWatchAgent.exe /F >NUL 2>&1"; Flags: runhidden; StatusMsg: "Stopping existing HomeWatch Agent..."
-Filename: "{app}\{#MyAppExeName}"; Description: "Launch HomeWatch Agent for this Windows account"; Flags: nowait postinstall skipifsilent runasoriginaluser
-
 [UninstallRun]
+Filename: "{sys}\sc.exe"; Parameters: "stop HomeWatchUpdaterService"; Flags: runhidden waituntilterminated; RunOnceId: "StopHomeWatchService"
+Filename: "{sys}\sc.exe"; Parameters: "delete HomeWatchUpdaterService"; Flags: runhidden waituntilterminated; RunOnceId: "DeleteHomeWatchService"
 Filename: "{cmd}"; Parameters: "/C taskkill /IM HomeWatchAgent.exe /F >NUL 2>&1"; Flags: runhidden; RunOnceId: "StopHomeWatchAgent"
 
 [Code]
+function ServiceInstalled(): Boolean;
+var ResultCode: Integer;
+begin
+  Result := Exec(ExpandConstant('{sys}\sc.exe'), 'query HomeWatchUpdaterService', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) and (ResultCode = 0);
+end;
 procedure CurStepChanged(CurStep: TSetupStep);
 var
   OldConfig, NewConfig: String;
+  ResultCode: Integer;
 begin
+  if CurStep = ssInstall then
+  begin
+    // Avoid attempting to overwrite a running Windows service binary.
+    Exec(ExpandConstant('{sys}\sc.exe'), 'stop HomeWatchUpdaterService', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    Sleep(2000);
+  end;
   if CurStep = ssPostInstall then
   begin
     NewConfig := ExpandConstant('{commonappdata}\HomeWatch\config.json');

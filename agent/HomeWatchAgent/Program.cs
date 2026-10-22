@@ -46,6 +46,8 @@ public sealed class AgentContext : ApplicationContext
     DateTime lastActivityFlush = DateTime.MinValue;
     DateTime lastCommandPoll = DateTime.MinValue;
     DateTime lastUpdateCheck = DateTime.MinValue;
+    DateTime agentLaunchedAt = DateTime.UtcNow;
+    bool restartRequested = false;
     DateTime lastPolicyCheck = DateTime.MinValue;
     DateTime lastPolicyEnforcement = DateTime.MinValue;
     string lastPolicyNotice = "";
@@ -108,6 +110,7 @@ public sealed class AgentContext : ApplicationContext
         {
             try
             {
+                if (CheckRestartRequest()) return;
                 if (!IsActiveConsoleSession()) { await Task.Delay(2000); continue; }
                 TrackForeground();
                 if (string.IsNullOrEmpty(config.DeviceId) || string.IsNullOrEmpty(config.DeviceToken)) await EnsureEnrolledAsync();
@@ -438,57 +441,50 @@ public sealed class AgentContext : ApplicationContext
         await http.SendAsync(r);
     }
 
+    bool CheckRestartRequest()
+    {
+        if (restartRequested) return true;
+        var path = Path.Combine(dataDir, "restart-agent.request");
+        if (!File.Exists(path)) return false;
+        if (!long.TryParse(File.ReadAllText(path).Trim(), out var ticks)) return false;
+        if (new DateTime(ticks, DateTimeKind.Utc) <= agentLaunchedAt) return false;
+        restartRequested = true;
+        // This child process runs as the logged-in user (NEVER elevated).
+        // It launches the already-installed trusted agent once the service finishes.
+        var exe = Path.Combine(AppContext.BaseDirectory, "HomeWatchAgent.exe");
+        var command = "timeout /t 24 /nobreak >nul & start \"\" \"" + exe + "\"";
+        Process.Start(new ProcessStartInfo("cmd.exe", "/D /C " + command)
+        { UseShellExecute = false, CreateNoWindow = true });
+        tray.Visible = false;
+        Application.Exit();
+        return true;
+    }
+
     async Task CheckUpdateAsync(bool forceRefresh = false, int? commandId = null)
     {
         lastUpdateCheck = DateTime.UtcNow;
-        using var r = Request(HttpMethod.Get, forceRefresh ? "agent/update?refresh=true" : "agent/update");
-        var response = await http.SendAsync(r);
-        if (!response.IsSuccessStatusCode)
+        // The privileged service is the ONLY component authorized to install updates.
+        // This marker is a trigger, not an executable, URL, release path, or command.
+        var installed = Path.Combine(AppContext.BaseDirectory, "HomeWatchService.exe");
+        if (!File.Exists(installed))
         {
-            if (commandId.HasValue) await CompleteAsync(commandId.Value, $"update check failed: HTTP {(int)response.StatusCode}");
+            if (commandId.HasValue) await CompleteAsync(commandId.Value, "machine updater service not installed");
             return;
         }
-        var m = JsonSerializer.Deserialize<UpdateManifest>(await response.Content.ReadAsStringAsync(), new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
-        if (m?.Available != true || !Version.TryParse(m.Version, out var target) || !Version.TryParse(AgentVersion, out var current) || target <= current)
-        {
-            if (commandId.HasValue) await CompleteAsync(commandId.Value, $"already current ({AgentVersion})");
-            return;
-        }
-        Log($"Update available: {AgentVersion} -> {m.Version}");
-        var bytes = await http.GetByteArrayAsync(m.Url);
-        var hash = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
-        if (!hash.Equals(m.Sha256, StringComparison.OrdinalIgnoreCase))
-        {
-            Log("Update rejected: SHA-256 mismatch");
-            if (commandId.HasValue) await CompleteAsync(commandId.Value, "update rejected: SHA-256 mismatch");
-            return;
-        }
-        // A standard user cannot replace an all-users Program Files installation.
-        // Do not launch an updater which will fail after killing this agent.
         try
         {
-            var probe = Path.Combine(AppContext.BaseDirectory, $".homewatch-permission-{Guid.NewGuid():N}");
-            using (File.Create(probe)) { }
-            File.Delete(probe);
+            if (forceRefresh)
+            {
+                var marker = Path.Combine(dataDir, "check-update.request");
+                File.WriteAllText(marker, DateTime.UtcNow.Ticks.ToString());
+            }
+            if (commandId.HasValue) await CompleteAsync(commandId.Value, "update check requested from privileged service");
         }
-        catch (UnauthorizedAccessException)
+        catch (Exception ex)
         {
-            Log($"Update {m.Version} requires an administrator-run machine installer.");
-            if (commandId.HasValue) await CompleteAsync(commandId.Value, $"update {m.Version} requires admin installer (machine-wide install)");
-            return;
+            Log($"Service update request failed: {ex.Message}");
+            if (commandId.HasValue) await CompleteAsync(commandId.Value, "updater request failed: " + ex.Message);
         }
-        var zip = Path.Combine(logDir, $"update-{m.Version}.zip"); await File.WriteAllBytesAsync(zip, bytes);
-        var installedUpdater = Path.Combine(AppContext.BaseDirectory, "HomeWatchUpdater.exe");
-        if (!File.Exists(installedUpdater))
-        {
-            if (commandId.HasValue) await CompleteAsync(commandId.Value, "updater executable missing");
-            return;
-        }
-        if (commandId.HasValue) await CompleteAsync(commandId.Value, $"update {m.Version} staged");
-        var tempUpdater = Path.Combine(Path.GetTempPath(), $"HomeWatchUpdater-{Guid.NewGuid():N}.exe"); File.Copy(installedUpdater, tempUpdater);
-        Process.Start(new ProcessStartInfo(tempUpdater, $"{Environment.ProcessId} \"{AppContext.BaseDirectory.TrimEnd('\\')}\" \"{zip}\"") { UseShellExecute = true });
-        Log($"Update {m.Version} staged; handing off to updater");
-        tray.Visible = false; Application.Exit();
     }
 
     void ShowStatus() => MessageBox.Show($"Server: {config.ServerUrl}\nDevice: {config.DeviceId ?? "Awaiting approval"}\nVersion: {AgentVersion}\nUser: {LoggedInUser()}\nCurrent app: {currentApp}", "HomeWatch Agent");
