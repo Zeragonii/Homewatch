@@ -3,17 +3,19 @@
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>HomeWatch</title>
+<link rel="icon" type="image/png" href="/static/homewatch-logo.png">
+<link rel="apple-touch-icon" href="/static/homewatch-logo.png">
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
 <div id="login" class="center card">
-  <h1>HomeWatch</h1><p class="muted">Parent console</p>
+  <div class="brand-stack"><img src="/static/homewatch-logo.png" alt="HomeWatch logo" class="brand-logo login-logo"><div><h1>HomeWatch</h1><p class="muted">Parent console</p></div></div>
   <input id="username" placeholder="Username" value="admin"><input id="password" type="password" placeholder="Password">
   <button onclick="login()">Sign in</button><div id="loginError" class="error"></div>
 </div>
 <div id="app" class="hidden">
 <header>
-  <div><h1>HomeWatch</h1><span class="muted">Family console</span></div>
+  <div class="brand-stack"><img src="/static/homewatch-logo.png" alt="HomeWatch logo" class="brand-logo"><div><h1>HomeWatch</h1><span class="muted">Family console</span></div></div>
   <div class="header-actions"><nav><button id="nav-dashboard" class="nav active" onclick="showView('dashboard')">Dashboard</button><button id="nav-screentime" class="nav" onclick="showView('screentime')">Screen time</button><button id="nav-applications" class="nav" onclick="showView('applications')">Applications <span id="appRequestBadge" class="badge hidden">0</span></button><button id="nav-onboarding" class="nav" onclick="showView('onboarding')">Onboarding <span id="pendingBadge" class="badge hidden">0</span></button></nav><button class="secondary" onclick="logout()">Sign out</button></div>
 </header>
 <main>

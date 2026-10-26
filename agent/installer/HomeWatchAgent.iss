@@ -1,7 +1,7 @@
 #ifndef MyAppVersion
-  #define MyAppVersion "0.4.3.1"
+  #define MyAppVersion "0.4.4"
 #endif
-#define MyAppName "HomeWatch Agent"
+#define MyAppName "HomeWatch Launcher"
 #define MyAppPublisher "HomeWatch"
 #define MyAppExeName "HomeWatchAgent.exe"
 
@@ -27,6 +27,7 @@ ArchitecturesInstallIn64BitMode=x64compatible
 UsePreviousAppDir=no
 ; HomeWatch uses the native Program Files directory for its protected updater.
 DisableDirPage=yes
+SetupIconFile=HomeWatch.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}
 CloseApplications=yes
 RestartApplications=no
@@ -50,7 +51,7 @@ Filename: "{sys}\sc.exe"; Parameters: "create HomeWatchUpdaterService binPath= "
 ; may have been left configured for a previous installation directory.
 Filename: "{sys}\sc.exe"; Parameters: "config HomeWatchUpdaterService binPath= ""{app}\HomeWatchService.exe"" start= auto"; Flags: runhidden waituntilterminated; Check: ServiceInstalled
 Filename: "{sys}\sc.exe"; Parameters: "start HomeWatchUpdaterService"; Flags: runhidden waituntilterminated
-Filename: "{app}\{#MyAppExeName}"; Description: "Launch HomeWatch Agent for this Windows account"; Flags: nowait postinstall skipifsilent runasoriginaluser
+Filename: "{app}\{#MyAppExeName}"; Description: "Launch HomeWatch Launcher for this Windows account"; Flags: nowait postinstall skipifsilent runasoriginaluser
 
 [Registry]
 ; Every interactive Windows user launches their own agent on sign-in.
@@ -59,12 +60,12 @@ Root: HKLM; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: 
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: none; ValueName: "HomeWatchAgent"; Flags: deletevalue
 
 [Tasks]
-Name: "myappsdesktop"; Description: "Create a My Apps shortcut on the desktop"
+Name: "myappsdesktop"; Description: "Create a HomeWatch Launcher shortcut on the desktop"
 
 [Icons]
 Name: "{autoprograms}\HomeWatch Agent"; Filename: "{app}\{#MyAppExeName}"
-Name: "{autoprograms}\HomeWatch My Apps"; Filename: "{app}\{#MyAppExeName}"; Parameters: "--apps"
-Name: "{commondesktop}\HomeWatch My Apps"; Filename: "{app}\{#MyAppExeName}"; Parameters: "--apps"; Tasks: myappsdesktop
+Name: "{autoprograms}\HomeWatch Launcher"; Filename: "{app}\{#MyAppExeName}"; Parameters: "--apps"
+Name: "{commondesktop}\HomeWatch Launcher"; Filename: "{app}\{#MyAppExeName}"; Parameters: "--apps"; Tasks: myappsdesktop
 
 [UninstallRun]
 Filename: "{sys}\sc.exe"; Parameters: "stop HomeWatchUpdaterService"; Flags: runhidden waituntilterminated; RunOnceId: "StopHomeWatchService"

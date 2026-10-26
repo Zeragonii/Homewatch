@@ -240,7 +240,7 @@ long-term architecture.
 
 ## New in v0.4.0 — My Apps
 
-The child-facing **My Apps** portal can be opened by double-clicking the HomeWatch tray icon or right-clicking and choosing **My apps & requests**. If you run the v0.4 installer, it also adds a **HomeWatch My Apps** Start Menu shortcut. The portal lets children request executables, and the new **Applications** page in the web admin allows device, child or global approval. Fingerprints, signer information, revocation and launch history are included. See [RELEASE-v0.4.0.md](RELEASE-v0.4.0.md) for deployment and the important distinction between approved normal-user launch and Windows administrator elevation.
+The child-facing **HomeWatch Launcher** can be opened by double-clicking the HomeWatch tray icon or right-clicking and choosing **Open HomeWatch Launcher**. If you run the v0.4.4 installer, it also adds a **HomeWatch Launcher** Start Menu shortcut and uses the new HomeWatch logo for the app icon and web favicon. The portal lets children request executables, and the new **Applications** page in the web admin allows device, child or global approval. Fingerprints, signer information, revocation and launch history are included. See [RELEASE-v0.4.0.md](RELEASE-v0.4.0.md) for deployment and the important distinction between approved normal-user launch and Windows administrator elevation.
 
 
 ### Native x64 installation patch (v0.4.3a)

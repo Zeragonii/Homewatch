@@ -91,9 +91,9 @@ public sealed class AgentContext : ApplicationContext
         portalSignalTimer.Start();
         Directory.CreateDirectory(dataDir);
         Directory.CreateDirectory(logDir);
-        tray = new NotifyIcon { Icon = SystemIcons.Shield, Visible = true, Text = "HomeWatch Agent" };
+        tray = new NotifyIcon { Icon = LoadBrandIcon(), Visible = true, Text = "HomeWatch Launcher" };
         var menu = new ContextMenuStrip();
-        menu.Items.Add("My apps && requests", null, (_, _) => ShowAppPortal());
+        menu.Items.Add("Open HomeWatch Launcher", null, (_, _) => ShowAppPortal());
         menu.Items.Add("Status", null, (_, _) => ShowStatus());
         tray.DoubleClick += (_, _) => ShowAppPortal();
         menu.Items.Add("Exit", null, (_, _) => { tray.Visible = false; Application.Exit(); });
@@ -563,16 +563,16 @@ public sealed class AgentContext : ApplicationContext
     // an existing machine upgraded remotely without rerunning the MSI/installer.
     void EnsureDesktopShortcut()
     {
-        var marker = Path.Combine(logDir, "myapps-shortcut-initialized");
+        var marker = Path.Combine(logDir, "launcher-shortcut-v2-initialized");
         if (File.Exists(marker)) return;
         object? shell = null, shortcut = null;
         try
         {
             var desktop = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
             if (string.IsNullOrWhiteSpace(desktop)) return;
-            var linkPath = Path.Combine(desktop, "HomeWatch My Apps.lnk");
+            var linkPath = Path.Combine(desktop, "HomeWatch Launcher.lnk");
             var commonDesktop = Environment.GetFolderPath(Environment.SpecialFolder.CommonDesktopDirectory);
-            var commonLink = Path.Combine(commonDesktop, "HomeWatch My Apps.lnk");
+            var commonLink = Path.Combine(commonDesktop, "HomeWatch Launcher.lnk");
             if (!File.Exists(linkPath) && !File.Exists(commonLink))
             {
                 var shellType = Type.GetTypeFromProgID("WScript.Shell");
@@ -587,7 +587,8 @@ public sealed class AgentContext : ApplicationContext
                 type.InvokeMember("TargetPath", BindingFlags.SetProperty, null, shortcut, new object[] { exe });
                 type.InvokeMember("Arguments", BindingFlags.SetProperty, null, shortcut, new object[] { "--apps" });
                 type.InvokeMember("WorkingDirectory", BindingFlags.SetProperty, null, shortcut, new object[] { AppContext.BaseDirectory });
-                type.InvokeMember("Description", BindingFlags.SetProperty, null, shortcut, new object[] { "My HomeWatch apps and requests" });
+                type.InvokeMember("Description", BindingFlags.SetProperty, null, shortcut, new object[] { "Open HomeWatch Launcher" });
+                type.InvokeMember("IconLocation", BindingFlags.SetProperty, null, shortcut, new object[] { exe + ",0" });
                 type.InvokeMember("Save", BindingFlags.InvokeMethod, null, shortcut, null);
             }
             File.WriteAllText(marker, "Created once; remove the shortcut manually if unwanted.");
@@ -600,7 +601,18 @@ public sealed class AgentContext : ApplicationContext
         }
     }
 
-    void ShowStatus() => MessageBox.Show($"Server: {config.ServerUrl}\nDevice: {config.DeviceId ?? "Awaiting approval"}\nVersion: {AgentVersion}\nUser: {LoggedInUser()}\nCurrent app: {currentApp}\nUpdater: {ReadUpdateStatus()}", "HomeWatch Agent");
+    internal static Icon LoadBrandIcon()
+    {
+        try
+        {
+            var exeIcon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
+            if (exeIcon is not null) return (Icon)exeIcon.Clone();
+        }
+        catch { }
+        return SystemIcons.Application;
+    }
+
+    void ShowStatus() => MessageBox.Show($"Server: {config.ServerUrl}\nDevice: {config.DeviceId ?? "Awaiting approval"}\nVersion: {AgentVersion}\nUser: {LoggedInUser()}\nCurrent app: {currentApp}\nUpdater: {ReadUpdateStatus()}", "HomeWatch Launcher");
 
     static string GetAgentVersion()
     {

@@ -39,14 +39,14 @@ public sealed class AppPortalForm : Form
         http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
         Directory.CreateDirectory(cacheDirectory);
 
-        Text = "HomeWatch | My Games";
+        Text = "HomeWatch Launcher";
         StartPosition = FormStartPosition.CenterScreen;
         MinimumSize = new Size(900, 650);
         Size = new Size(1120, 750);
         BackColor = Background;
         ForeColor = TextColor;
         Font = new Font("Segoe UI", 10);
-        Icon = SystemIcons.Shield;
+        Icon = Program.LoadBrandIcon();
 
         var root = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(25, 18, 25, 16), ColumnCount = 1, RowCount = 3, BackColor = Background };
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 108));
@@ -60,9 +60,9 @@ public sealed class AppPortalForm : Form
         heading.RowStyles.Add(new RowStyle(SizeType.Absolute, 22));
         heading.RowStyles.Add(new RowStyle(SizeType.Absolute, 47));
         heading.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        heading.Controls.Add(new Label { Text = "HOMEWATCH  /  MY SPACE", ForeColor = Green, Dock = DockStyle.Fill, Font = new Font("Segoe UI Semibold", 9, FontStyle.Bold) }, 0, 0);
-        heading.Controls.Add(new Label { Text = "My games & apps", ForeColor = TextColor, Dock = DockStyle.Fill, Font = new Font("Segoe UI Semibold", 25, FontStyle.Bold) }, 0, 1);
-        heading.Controls.Add(new Label { Text = "Pick something you love. We'll keep your collection ready.", ForeColor = Muted, Dock = DockStyle.Fill, AutoEllipsis = true }, 0, 2);
+        heading.Controls.Add(new Label { Text = "HOMEWATCH  /  LAUNCHER", ForeColor = Green, Dock = DockStyle.Fill, Font = new Font("Segoe UI Semibold", 9, FontStyle.Bold) }, 0, 0);
+        heading.Controls.Add(new Label { Text = "HomeWatch Launcher", ForeColor = TextColor, Dock = DockStyle.Fill, Font = new Font("Segoe UI Semibold", 25, FontStyle.Bold) }, 0, 1);
+        heading.Controls.Add(new Label { Text = "Pick something you love. Request new games and apps whenever you need them.", ForeColor = Muted, Dock = DockStyle.Fill, AutoEllipsis = true }, 0, 2);
         header.Controls.Add(heading, 0, 0);
         var headerActions = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown, WrapContents = false, Padding = new Padding(0, 1, 0, 0) };
         var request = ButtonFor("+ Request a new app", Accent, 215, 42);
