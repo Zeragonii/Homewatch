@@ -242,7 +242,7 @@ class HouseholdCatalogueItem(Base):
     manifest_json: Mapped[str] = mapped_column(Text, default="", server_default=text("''"))
     total_bytes: Mapped[int] = mapped_column(BigInteger, default=0, server_default=text("0"))
     file_count: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"))
-    enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default=text("1"))
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default=text("true"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
