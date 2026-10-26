@@ -266,3 +266,8 @@ See [RELEASE-v0.4.5.md](RELEASE-v0.4.5.md) for installation requirements and imp
 ## v0.5.0 — Interactive household installation from a remote NAS
 
 HomeWatch now supports configuring the NAS share *inside the parent web UI*, without a Docker bind mount. It browses directories using SMB, hashes complete multi-file installation packages and exposes approved UNC sources to enrolled Windows clients. The clients stage and verify the full package before launching the normal interactive installer, then discover/request approval for the installed game's executable. See [RELEASE-v0.5.0.md](RELEASE-v0.5.0.md) for setup details and limits, including the separate SMB permissions required on each Windows PC.
+
+
+### v0.5.1 faster package transfers and optional Defender configuration
+
+See [RELEASE-v0.5.1.md](RELEASE-v0.5.1.md) for single-pass streaming SHA-256 transfer verification and the *one-time, locally administrator-approved* optional exclusion script. The HomeWatch agent and updater do not automatically change Defender settings.

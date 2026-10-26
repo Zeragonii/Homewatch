@@ -62,39 +62,48 @@ internal static class HouseholdPackageInstaller
             try
             {
                 progress($"Copying {relative}… {done * 100.0 / Math.Max(1, manifest.TotalBytes):F1}%");
-                await using (var input = new FileStream(source, FileMode.Open, FileAccess.Read, FileShare.Read, 1024 * 1024, true))
-                await using (var output = new FileStream(temp, FileMode.Create, FileAccess.Write, FileShare.None, 1024 * 1024, true))
+                // Hash as bytes stream from the SMB share into the staging file.
+                // A second full disk read is unnecessary for a newly copied file.
+                await using (var input = new FileStream(source, FileMode.Open, FileAccess.Read, FileShare.Read,
+                    1024 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan))
+                await using (var output = new FileStream(temp, FileMode.Create, FileAccess.Write, FileShare.None,
+                    1024 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan))
+                using (var sha = IncrementalHash.CreateHash(HashAlgorithmName.SHA256))
                 {
                     if (input.Length != file.Size) throw new IOException($"Source changed: {relative}");
                     var buffer = new byte[1024 * 1024];
                     long copied = 0;
                     int read;
+                    var progressClock = Stopwatch.StartNew();
                     while ((read = await input.ReadAsync(buffer, token)) > 0)
                     {
                         copied += read;
                         if (copied > file.Size) throw new IOException($"Unexpected file size: {relative}");
+                        sha.AppendData(buffer, 0, read);
                         await output.WriteAsync(buffer.AsMemory(0, read), token);
-                        progress($"Copying {relative}… {(done + copied) * 100.0 / Math.Max(1, manifest.TotalBytes):F1}%");
+                        // Windows Forms must not redraw the status for every 1 MiB block.
+                        if (progressClock.ElapsedMilliseconds >= 200)
+                        {
+                            progress($"Copying {relative}… {(done + copied) * 100.0 / Math.Max(1, manifest.TotalBytes):F1}%");
+                            progressClock.Restart();
+                        }
                     }
                     if (copied != file.Size) throw new IOException($"Incomplete copy: {relative}");
+                    if (!Convert.ToHexString(sha.GetHashAndReset()).Equals(file.Sha256,
+                        StringComparison.OrdinalIgnoreCase))
+                        throw new IOException($"SHA-256 mismatch: {relative}. The source may have changed since approval.");
+                    // The output stream is disposed before the file is renamed.
+                    await output.FlushAsync(token);
                 }
-                progress($"Verifying {relative}…");
-                if (!await MatchesAsync(temp, file.Sha256, token))
-                    throw new IOException($"SHA-256 mismatch: {relative}. The source may have changed since approval.");
                 File.Move(temp, destination, true);
                 done += file.Size;
+                progress($"Copied and verified {relative} — {done * 100.0 / Math.Max(1, manifest.TotalBytes):F1}%");
             }
             finally { try { if (File.Exists(temp)) File.Delete(temp); } catch { } }
         }
-        // All copies are individually hashed. Verify them once more before execution.
-        progress("Verifying the complete package…");
-        foreach (var file in manifest.Files)
-        {
-            token.ThrowIfCancellationRequested();
-            var target = Path.Combine(stage, SafeRelative(file.Path));
-            if (!await MatchesAsync(target, file.Sha256, token))
-                throw new IOException($"Package integrity check failed: {file.Path}");
-        }
+        // Existing cached files were checked when reused. Newly copied files
+        // were verified while streaming and require no redundant second pass.
+
         return Path.Combine(stage, entrypoint);
     }
 

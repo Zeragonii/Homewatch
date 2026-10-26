@@ -467,6 +467,14 @@ public sealed class AppPortalForm : Form
                 if (fresh == null || !fresh.Enabled || fresh.InstallerSha256 != item.InstallerSha256)
                     throw new IOException("Parent has changed or withdrawn this package");
             }
+            // Do not rehash multi-gigabyte data archives. Recheck only the setup
+            // executable before Windows executes it from the writable local cache.
+            var entry = item.Manifest.Files.FirstOrDefault(f =>
+                string.Equals(f.Path, item.Manifest.Entrypoint, StringComparison.OrdinalIgnoreCase));
+            if (entry == null || !File.Exists(exe) ||
+                (File.GetAttributes(exe) & FileAttributes.ReparsePoint) != 0 ||
+                !await HashMatchesAsync(exe, entry.Sha256))
+                throw new IOException("Approved setup executable changed after staging. Installation blocked.");
             await InstallationStateAsync(item.Id, "installing");
             var before = HouseholdPackageInstaller.UninstallLocations();
             footer.Text = "Installer open — follow the normal Windows setup wizard.";
@@ -580,7 +588,12 @@ public sealed class AppPortalForm : Form
                 "HomeWatch", "installers", current.InstallerSha256);
             Directory.CreateDirectory(root);
             var target = Path.Combine(root, "HomeWatch-Installer.exe");
-            if (!File.Exists(target) || !await HashMatchesAsync(target, current.InstallerSha256))
+            // Cached installers are verified on reuse. New transfers are hashed
+            // while writing, so large EXEs are not read again solely to verify.
+            bool verified = File.Exists(target) &&
+                (File.GetAttributes(target) & FileAttributes.ReparsePoint) == 0 &&
+                await HashMatchesAsync(target, current.InstallerSha256);
+            if (!verified)
             {
                 var temp = Path.Combine(root, "download-" + Guid.NewGuid().ToString("N") + ".tmp");
                 footer.Text = $"Copying {app.DisplayName} from the family library…";
@@ -589,6 +602,7 @@ public sealed class AppPortalForm : Form
                     const long maxLength = 8L * 1024 * 1024 * 1024;
                     await using (var output = new FileStream(temp, FileMode.CreateNew, FileAccess.Write, FileShare.None))
                     {
+                        string hash;
                         if (httpSource)
                         {
                             // Never forward device bearer credentials to the NAS URL.
@@ -600,28 +614,28 @@ public sealed class AppPortalForm : Form
                             if (download.Content.Headers.ContentLength > maxLength)
                                 throw new IOException("Installer is larger than the 8 GB limit.");
                             await using var input = await download.Content.ReadAsStreamAsync();
-                            await CopyLimitedAsync(input, output, maxLength);
+                            hash = await CopyLimitedAsync(input, output, maxLength);
                         }
                         else
                         {
                             await using var input = new FileStream(source, FileMode.Open, FileAccess.Read, FileShare.Read);
                             if (input.Length > maxLength) throw new IOException("Installer is larger than the 8 GB limit.");
-                            await CopyLimitedAsync(input, output, maxLength);
+                            hash = await CopyLimitedAsync(input, output, maxLength);
+                        }
+                        if (!hash.Equals(current.InstallerSha256, StringComparison.OrdinalIgnoreCase))
+                        {
+                            status = "hash_mismatch";
+                            throw new IOException("Installer fingerprint mismatch. Nothing was launched. Ask your parent to verify the NAS file and its SHA-256.");
                         }
                     }
-                    if (!await HashMatchesAsync(temp, current.InstallerSha256))
-                    {
-                        status = "hash_mismatch";
-                        throw new IOException("Installer fingerprint mismatch. Nothing was launched. Ask your parent to verify the NAS file and its SHA-256.");
-                    }
                     File.Move(temp, target, true);
+                    verified = true;
                 }
                 finally { try { if (File.Exists(temp)) File.Delete(temp); } catch { } }
             }
-            // Recheck the exact local bytes and the parent's publication status
-            // right before launching (the catalogue may have been revoked).
-            if (!await HashMatchesAsync(target, current.InstallerSha256))
-                throw new IOException("Installer changed after verification. Launch blocked.");
+            // Each local installer has now been checked once, either during
+            // staging or when reusing it from a previous run.
+            if (!verified) throw new IOException("Installer verification incomplete.");
             using (var publishCheck = await http.GetAsync($"agent/catalogue/{app.CatalogueId}"))
             {
                 await RequireSuccess(publishCheck);
@@ -655,17 +669,21 @@ public sealed class AppPortalForm : Form
         }
     }
 
-    private static async Task CopyLimitedAsync(Stream input, Stream output, long maxLength)
+    private static async Task<string> CopyLimitedAsync(Stream input, Stream output, long maxLength)
     {
-        var buffer = new byte[128 * 1024];
+        var buffer = new byte[1024 * 1024];
+        using var sha = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         long copied = 0;
         int size;
         while ((size = await input.ReadAsync(buffer)) > 0)
         {
             copied += size;
             if (copied > maxLength) throw new IOException("Installer is larger than the 8 GB limit.");
+            sha.AppendData(buffer, 0, size);
             await output.WriteAsync(buffer.AsMemory(0, size));
         }
+        await output.FlushAsync();
+        return Convert.ToHexString(sha.GetHashAndReset()).ToLowerInvariant();
     }
 
     private static async Task<bool> HashMatchesAsync(string filename, string expected)
