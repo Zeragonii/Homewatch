@@ -153,8 +153,10 @@ public sealed class AppPortalForm : Form
                             Publisher = "HomeWatch family library", Status = "available",
                             PackageStatus = item.Installation?.Status ?? "not_installed",
                             InstalledPath = item.Installation?.ExecutablePath ?? "",
-                            InstalledRequestId = item.Installation?.RequestId ?? 0,
-                            InstalledApproved = item.Installation?.Approved ?? false,
+                            InstallRoot = item.Installation?.InstallRoot ?? "",
+                            GameScanRoots = item.GameScanRoots,
+                            InstalledRequestId = item.Installation?.Status == "uninstalled" ? 0 : item.Installation?.RequestId ?? 0,
+                            InstalledApproved = item.Installation?.Status != "uninstalled" && (item.Installation?.Approved ?? false),
                             PackageSize = item.TotalBytes
                         });
                     }
@@ -209,7 +211,7 @@ public sealed class AppPortalForm : Form
         var name = new Label { Text = app.DisplayName, Location = new Point(9, 211), Size = new Size(157, 29),
             Font = new Font("Segoe UI Semibold", 10, FontStyle.Bold), AutoEllipsis = true, ForeColor = TextColor };
         tile.Controls.Add(name);
-        var status = new Label { Text = app.IsCatalogue ? (app.InstalledApproved ? "✓ Ready to play" : app.InstalledRequestId > 0 ? "◷ Awaiting approval" : app.PackageStatus == "installing" ? "Installing" : "↓ Available to install") : approved ? "✓ Ready to play" : app.Status == "pending" ? "◷ Waiting for approval" : "Not available",
+        var status = new Label { Text = app.IsCatalogue ? (app.InstalledApproved ? "✓ Ready to play" : app.InstalledRequestId > 0 ? "◷ Awaiting approval" : app.PackageStatus == "uninstalling" ? "Removing" : app.PackageStatus == "uninstalled" ? "↓ Available to install" : app.PackageStatus == "installing" ? "Installing" : "↓ Available to install") : approved ? "✓ Ready to play" : app.Status == "pending" ? "◷ Waiting for approval" : "Not available",
             ForeColor = approved || app.InstalledApproved ? Green : app.IsCatalogue ? Accent : app.Status == "pending" ? Amber : Muted,
             Location = new Point(9, 241), Size = new Size(157, 23), AutoEllipsis = true,
             Font = new Font("Segoe UI", 9) };
@@ -300,14 +302,14 @@ public sealed class AppPortalForm : Form
             content.RowStyles.Add(new RowStyle(SizeType.Absolute, 48));
             content.RowStyles.Add(new RowStyle(SizeType.Absolute, 72));
             content.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-            content.RowStyles.Add(new RowStyle(SizeType.Absolute, 61));
+            content.RowStyles.Add(new RowStyle(SizeType.Absolute, 108));
             content.Controls.Add(new Label { Text = "ABOUT THIS APP", ForeColor = Accent, Dock = DockStyle.Fill,
                 Font = new Font("Segoe UI Semibold", 9, FontStyle.Bold) }, 0, 0);
             content.Controls.Add(new Label { Text = app?.DisplayName ?? "Choose a game", ForeColor = TextColor,
                 Dock = DockStyle.Fill, AutoEllipsis = true,
                 Font = new Font("Segoe UI Semibold", 20, FontStyle.Bold) }, 0, 1);
             var approved = app?.Status == "approved" || app?.InstalledApproved == true;
-            var statusText = app is null ? "Select a tile to see its details" : app.IsCatalogue ? (app.InstalledApproved ? "✓ Installed — ready to play" : app.InstalledRequestId > 0 ? "◷ Installed — waiting for parent approval" : "↓ In the family library") : approved ? "✓ Approved and ready" :
+            var statusText = app is null ? "Select a tile to see its details" : app.IsCatalogue ? (app.PackageStatus == "uninstalled" ? "↓ Available to install" : app.InstalledApproved ? "✓ Installed — ready to play" : app.InstalledRequestId > 0 ? "◷ Installed — waiting for parent approval" : "↓ In the family library") : approved ? "✓ Approved and ready" :
                 app.Status == "pending" ? "◷ Waiting for parent approval" : "Not approved";
             content.Controls.Add(new Label { Text = statusText, ForeColor = approved ? Green : Amber, Dock = DockStyle.Fill,
                 Font = new Font("Segoe UI Semibold", 10, FontStyle.Bold) }, 0, 2);
@@ -315,7 +317,7 @@ public sealed class AppPortalForm : Form
                 ForeColor = Muted, AutoEllipsis = true, Dock = DockStyle.Fill }, 0, 3);
             content.Controls.Add(new Label { Text = app is null ? "A nice place to keep your favourite games!" :
                 app.IsCatalogue ? $"{app.Description}\n\nInstaller: {app.FileName}\nSize: {app.PackageSize / (1024.0 * 1024 * 1024):F2} GB\n" +
-                (string.IsNullOrEmpty(app.InstalledPath) ? "Available to everyone in your family." : $"Installed here: {app.InstalledPath}") :
+                (string.IsNullOrEmpty(app.InstalledPath) || app.PackageStatus == "uninstalled" ? "Available to everyone in your family." : $"Installed here: {app.InstalledPath}") :
                 $"File: {app.FileName}\n{app.FilePath}\n\nOnly applications approved by your parent can be opened here.",
                 ForeColor = Muted, Dock = DockStyle.Fill, AutoEllipsis = true }, 0, 4);
             var canUse = approved || app?.IsCatalogue == true;
@@ -326,7 +328,19 @@ public sealed class AppPortalForm : Form
                 button.Click += async (_, _) => { if (app.IsCatalogue && app.InstalledApproved) await LaunchInstalledAsync(app, button);
                     else if (app.IsCatalogue && app.PackageStatus == "detecting") await ChooseInstalledAsync(app, button);
                     else if (app.IsCatalogue) await InstallCatalogueAsync(app, button); else await LaunchAsync(app, button); };
-            content.Controls.Add(button, 0, 5);
+            var actionPanel = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2 };
+            actionPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 55));
+            actionPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
+            actionPanel.Controls.Add(button, 0, 0);
+            if (app?.IsCatalogue == true && !string.IsNullOrEmpty(app.InstalledPath) &&
+                app.PackageStatus is not ("uninstalled" or "uninstalling"))
+            {
+                var remove = ButtonFor("Uninstall game…", Color.FromArgb(116, 54, 62), 100, 36);
+                remove.Dock = DockStyle.Fill;
+                remove.Click += async (_, _) => await UninstallCatalogueAsync(app, remove);
+                actionPanel.Controls.Add(remove, 0, 1);
+            }
+            content.Controls.Add(actionPanel, 0, 5);
             detailPane.Controls.Add(content);
         }
         finally { detailPane.ResumeLayout(); }
@@ -426,6 +440,106 @@ public sealed class AppPortalForm : Form
             item.Name, item.GameScanRoots);
         await InstallationStateAsync(item.Id, "awaiting_approval", Path.GetDirectoryName(selected) ?? "",
             selected, candidate.Sha256, requestId, root ?? "");
+    }
+
+    private async Task UninstallCatalogueAsync(PortalApplication app, Button button)
+    {
+        if (!app.IsCatalogue || app.CatalogueId <= 0 || installing ||
+            app.PackageStatus == "uninstalled" || string.IsNullOrWhiteSpace(app.InstalledPath)) return;
+        string exe = app.InstalledPath;
+        if (!File.Exists(exe))
+        {
+            footer.Text = "The game executable is missing. Ask your parent to reconcile this installation.";
+            return;
+        }
+        if (MessageBox.Show(this, $"Uninstall {app.DisplayName} from this PC?\n\n" +
+            "HomeWatch will use the Windows uninstaller when available. Otherwise, it can remove the " +
+            "game's dedicated installation folder. Saved data inside that folder could be lost.",
+            "Uninstall game", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
+
+        installing = true;
+        button.Enabled = false;
+        string result = "remove_failed";
+        bool removalStarted = false;
+        string detail = "Uninstall cancelled or incomplete";
+        try
+        {
+            // Always reload this device's current server state before removing anything.
+            using var response = await http.GetAsync($"agent/catalogue/{app.CatalogueId}");
+            await RequireSuccess(response);
+            var current = await response.Content.ReadFromJsonAsync<PortalCatalogueItem>();
+            if (current?.Installation is null || current.Installation.Status == "uninstalled" ||
+                !string.Equals(current.Installation.ExecutablePath, exe, StringComparison.OrdinalIgnoreCase))
+                throw new IOException("Installation changed; refresh the family library.");
+            var root = current.Installation.InstallRoot;
+            var registered = HouseholdGameUninstaller.FindRegistered(exe, root);
+            if (registered is not null)
+            {
+                if (MessageBox.Show(this,
+                    $"Windows registered this uninstall program:\n{registered.DisplayName}\n\n" +
+                    "Do you want to run its normal uninstall wizard?",
+                    "Use Windows uninstaller", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
+                    return;
+                removalStarted = true;
+                await InstallationStateAsync(app.CatalogueId, "uninstalling", current.Installation.ExecutablePath,
+                    exe, installRoot: root);
+                footer.Text = $"Opening Windows uninstaller for {app.DisplayName}…";
+                await HouseholdGameUninstaller.RunRegisteredAsync(registered);
+                // A bootstrapper may exit before its child finishes. Don't say removed
+                // until the game EXE really has gone.
+                if (File.Exists(exe))
+                    throw new IOException("The Windows uninstaller finished, but the game executable is still present. " +
+                        "Complete any other uninstaller windows, then try again.");
+                detail = "Windows registered uninstaller completed";
+            }
+            else
+            {
+                footer.Text = "Checking game folder before removal…";
+                string? safeRoot = await Task.Run(() => HouseholdGameUninstaller.SafeDeleteRoot(root, exe, current.GameScanRoots));
+                if (safeRoot is null)
+                    throw new IOException("No registered uninstaller or safe dedicated game folder was found. " +
+                        "Only games directly inside a parent-configured game-library folder can be removed this way.");
+                if (MessageBox.Show(this,
+                    $"Permanently delete this entire game directory?\n\n{safeRoot}\n\n" +
+                    "This may also delete saves or mods stored inside it. This cannot be undone.",
+                    "Confirm permanent removal", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes)
+                    return;
+                // Revalidate immediately before deletion, rejecting junctions and links.
+                if (!string.Equals(safeRoot,
+                    await Task.Run(() => HouseholdGameUninstaller.SafeDeleteRoot(root, exe, current.GameScanRoots)),
+                    StringComparison.OrdinalIgnoreCase)) throw new IOException("Game directory changed; removal cancelled");
+                removalStarted = true;
+                await InstallationStateAsync(app.CatalogueId, "uninstalling", current.Installation.ExecutablePath,
+                    exe, installRoot: root);
+                footer.Text = $"Removing {app.DisplayName}…";
+                await Task.Run(() => Directory.Delete(safeRoot, recursive: true));
+                detail = "Removed game folder " + safeRoot;
+            }
+            await InstallationStateAsync(app.CatalogueId, "uninstalled");
+            result = "removed";
+            footer.Text = $"{app.DisplayName} was removed from this PC. You can install it again later.";
+        }
+        catch (Exception e)
+        {
+            detail = e.Message;
+            footer.Text = "Could not uninstall game: " + e.Message;
+            try { await InstallationStateAsync(app.CatalogueId, "uninstall_failed"); } catch { }
+        }
+        finally
+        {
+            if (removalStarted)
+            {
+                try
+                {
+                    using var audit = await http.PostAsJsonAsync($"agent/catalogue/{app.CatalogueId}/attempts",
+                        new { status = result, detail = detail.Length > 280 ? detail[..280] : detail });
+                    await RequireSuccess(audit);
+                }
+                catch { }
+            }
+            installing = false;
+            if (!IsDisposed) { button.Enabled = true; await LoadAppsAsync(force: true); }
+        }
     }
 
     private async Task InstallCatalogueAsync(PortalApplication app, Button button)
@@ -914,6 +1028,7 @@ public sealed class PackageInstallation
 {
     [JsonPropertyName("status")] public string Status { get; set; } = "";
     [JsonPropertyName("executable_path")] public string ExecutablePath { get; set; } = "";
+    [JsonPropertyName("install_root")] public string InstallRoot { get; set; } = "";
     [JsonPropertyName("request_id")] public int? RequestId { get; set; }
     [JsonPropertyName("approved")] public bool Approved { get; set; }
 }
@@ -940,6 +1055,8 @@ public sealed class PortalApplication
     public string Description { get; set; } = "";
     public string PackageStatus { get; set; } = "";
     public string InstalledPath { get; set; } = "";
+    public string InstallRoot { get; set; } = "";
+    public List<string> GameScanRoots { get; set; } = new();
     public int InstalledRequestId { get; set; }
     public bool InstalledApproved { get; set; }
     public long PackageSize { get; set; }

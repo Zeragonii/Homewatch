@@ -283,6 +283,7 @@ class HouseholdInstallation(Base):
     status: Mapped[str] = mapped_column(String(30), default="not_installed")
     installed_path: Mapped[str] = mapped_column(Text, default="")
     executable_path: Mapped[str] = mapped_column(Text, default="")
+    install_root: Mapped[str] = mapped_column(Text, default="", server_default=text("''"))
     executable_sha256: Mapped[str] = mapped_column(String(64), default="")
     request_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
@@ -347,6 +348,10 @@ with engine.begin() as conn:
                          "launch_relative_path": "VARCHAR(700) NOT NULL DEFAULT ''"}.items():
             if col not in catalog_columns:
                 conn.execute(text(f"ALTER TABLE household_catalogue ADD COLUMN {col} {ddl}"))
+    if inspect(conn).has_table("household_installations"):
+        install_columns = {c["name"] for c in inspect(conn).get_columns("household_installations")}
+        if "install_root" not in install_columns:
+            conn.execute(text("ALTER TABLE household_installations ADD COLUMN install_root TEXT NOT NULL DEFAULT ''"))
     if inspect(conn).has_table("application_presentations"):
         conn.execute(text("UPDATE application_presentations SET artwork_revision = 0 WHERE artwork_revision IS NULL"))
 
@@ -1391,9 +1396,9 @@ def catalogue_json(db: Session, item: HouseholdCatalogueItem, include_path: bool
             approved = False
             if found.request_id:
                 req = db.get(ApplicationRequest, found.request_id)
-                approved = bool(req and request_json(req, db, db.get(Device, device_id))['status'] == 'approved')
+                approved = bool(found.status != 'uninstalled' and req and request_json(req, db, db.get(Device, device_id))['status'] == 'approved')
             state = dict(status=found.status, installed_path=found.installed_path,
-                         executable_path=found.executable_path, executable_sha256=found.executable_sha256,
+                         install_root=found.install_root, executable_path=found.executable_path, executable_sha256=found.executable_sha256,
                          request_id=found.request_id, approved=approved)
     manifest = json.loads(item.manifest_json) if item.manifest_json else None
     return dict(id=item.id, name=presentation['display_name'] or item.name,
@@ -1444,7 +1449,7 @@ def admin_catalogue(db: Session = Depends(db_session)):
                                         executable_sha256=x.executable_sha256,
                                         created_at=x.created_at.isoformat()) for x in suggestions],
             'installations': [dict(catalogue_id=x.catalogue_id, device_id=x.device_id, status=x.status,
-                                   installed_path=x.installed_path, executable_path=x.executable_path,
+                                   install_root=x.install_root, installed_path=x.installed_path, executable_path=x.executable_path,
                                    updated_at=x.updated_at.isoformat())
                               for x in db.scalars(select(HouseholdInstallation).order_by(HouseholdInstallation.updated_at.desc()).limit(100)).all()],
             'attempts': [dict(id=a.id, catalogue_id=a.catalogue_id, device_id=a.device_id,
@@ -1514,7 +1519,7 @@ def agent_install_attempt(catalogue_id: int, body: InstallAttemptBody,
                           device: Device = Depends(agent_auth), db: Session = Depends(db_session)):
     row = db.get(HouseholdCatalogueItem, catalogue_id)
     if not row: raise HTTPException(404, 'Catalogue entry not found')
-    if body.status not in ('started','failed','hash_mismatch'):
+    if body.status not in ('started','failed','hash_mismatch','removed','remove_failed'):
         raise HTTPException(400, 'Invalid install attempt status')
     db.add(HouseholdInstallAttempt(catalogue_id=catalogue_id, device_id=device.id,
                                   status=body.status, detail=body.detail[:300]))
@@ -1744,9 +1749,10 @@ def save_device_installation(catalogue_id: int, body: InstallationBody,
                              device: Device = Depends(agent_auth), db: Session = Depends(db_session)):
     item = db.get(HouseholdCatalogueItem, catalogue_id)
     if not item: raise HTTPException(404, 'Unknown package')
-    if body.status not in ('copying', 'verifying', 'installing', 'detecting', 'awaiting_approval', 'installed', 'failed'):
+    if body.status not in ('copying', 'verifying', 'installing', 'detecting', 'awaiting_approval', 'installed', 'failed', 'uninstalling', 'uninstalled', 'uninstall_failed'):
         raise HTTPException(400, 'Unknown installation state')
     if (len(body.installed_path) > 2048 or len(body.executable_path) > 2048 or
+        len(body.install_root) > 2048 or
         len(body.executable_sha256) not in (0, 64)):
         raise HTTPException(400, 'Invalid installed application')
     if body.executable_sha256 and not re.fullmatch('[a-f0-9]{64}', body.executable_sha256):
@@ -1777,7 +1783,25 @@ def save_device_installation(catalogue_id: int, body: InstallationBody,
                 existing.relative_path = relative
                 existing.installer_sha256 = item.installer_sha256
                 existing.executable_sha256 = body.executable_sha256
+    # Only allow clearing an existing installation record, never report an
+    # arbitrary game's removal. Existing approvals remain in the audit history.
+    if body.status in ('uninstalling', 'uninstalled', 'uninstall_failed') and not row.executable_path:
+        raise HTTPException(409, 'No installed game is recorded on this device')
     row.status = body.status
+    if body.status == 'uninstall_failed':
+        row.updated_at = datetime.now(timezone.utc)
+        db.commit()
+        return {'ok': True}
+    if body.status == 'uninstalled':
+        row.install_root = ''
+        row.installed_path = ''
+        # Keep the historical executable path and request ID to prevent stale
+        # standalone approval tiles reappearing after a game's files are removed.
+        row.updated_at = datetime.now(timezone.utc)
+        db.commit()
+        return {'ok': True}
+    if body.install_root:
+        row.install_root = body.install_root
     row.installed_path = body.installed_path
     row.executable_path = body.executable_path
     row.executable_sha256 = body.executable_sha256
