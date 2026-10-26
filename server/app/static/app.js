@@ -24,11 +24,11 @@ async function login(){try{await api('/api/login',{method:'POST',body:JSON.strin
 async function logout(){await fetch('/api/logout',{method:'POST'});location.reload()}
 async function showApp(){loginPanel.classList.add('hidden');appPanel.classList.remove('hidden');await refresh();if(!refreshTimer)refreshTimer=setInterval(refresh,5000)}
 
-function showView(view){currentView=view;['dashboard','screentime','onboarding'].forEach(v=>{document.getElementById(`view-${v}`).classList.toggle('hidden',v!==view);document.getElementById(`nav-${v}`).classList.toggle('active',v===view)});if(view==='screentime')loadScreenTime()}
+function showView(view){currentView=view;['dashboard','screentime','applications','onboarding'].forEach(v=>{document.getElementById(`view-${v}`).classList.toggle('hidden',v!==view);document.getElementById(`nav-${v}`).classList.toggle('active',v===view)});if(view==='screentime')loadScreenTime();if(view==='applications')loadApplications()}
 
-async function refresh(){try{const next=await api('/api/dashboard');state=next;renderSummary();renderChildren();renderPending();patchDevices();lastRefresh.textContent=`Updated ${new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'})}`;if(currentView==='screentime')loadScreenTime();}catch(e){if(e.message==='AUTH'){appPanel.classList.add('hidden');loginPanel.classList.remove('hidden');if(refreshTimer){clearInterval(refreshTimer);refreshTimer=null}}}}
+async function refresh(){try{const next=await api('/api/dashboard');state=next;renderSummary();renderChildren();renderPending();patchDevices();lastRefresh.textContent=`Updated ${new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'})}`;if(currentView==='screentime')loadScreenTime();if(currentView==='applications')loadApplications();}catch(e){if(e.message==='AUTH'){appPanel.classList.add('hidden');loginPanel.classList.remove('hidden');if(refreshTimer){clearInterval(refreshTimer);refreshTimer=null}}}}
 
-function renderSummary(){const total=state.devices.length,online=state.devices.filter(d=>d.online).length,pending=state.pending.length;statTotal.textContent=total;statOnline.textContent=online;statOffline.textContent=total-online;statPending.textContent=pending;pendingCount.textContent=pending?`${pending} waiting`:'None waiting';pendingBadge.textContent=pending;pendingBadge.classList.toggle('hidden',pending===0)}
+function renderSummary(){const appBadge=document.getElementById('appRequestBadge');if(appBadge){const n=state.pending_application_requests||0;appBadge.textContent=n;appBadge.classList.toggle('hidden',!n)}const total=state.devices.length,online=state.devices.filter(d=>d.online).length,pending=state.pending.length;statTotal.textContent=total;statOnline.textContent=online;statOffline.textContent=total-online;statPending.textContent=pending;pendingCount.textContent=pending?`${pending} waiting`:'None waiting';pendingBadge.textContent=pending;pendingBadge.classList.toggle('hidden',pending===0)}
 function renderChildren(){
   const wanted=new Set(state.children.map(c=>String(c.id)));
   childrenEl.querySelectorAll('[data-child-id]').forEach(el=>{if(!wanted.has(el.dataset.childId))el.remove()});
@@ -210,5 +210,40 @@ async function savePolicy(id,button){
 async function extendTime(id,minutes){await api(`/api/children/${id}/extension`,{method:'POST',body:JSON.stringify({minutes})});await loadScreenTime()}
 async function addAppLimit(id,button){const card=button.closest('[data-st-child]');const process=card.querySelector('.al-process').value.trim();if(!process)return;await api(`/api/children/${id}/app-limits`,{method:'POST',body:JSON.stringify({process_name:process,weekday_minutes:+card.querySelector('.al-wd').value||0,weekend_minutes:+card.querySelector('.al-we').value||0,enabled:true})});card.querySelector('.al-process').value='';card.querySelector('.al-wd').value='';card.querySelector('.al-we').value='';await loadScreenTime()}
 async function deleteAppLimit(id){await api(`/api/app-limits/${id}`,{method:'DELETE'});await loadScreenTime()}
+
+
+// Application approvals are not Windows elevation grants.
+let lastApplicationSnapshot='';
+async function loadApplications(force=false){
+  if(!document.getElementById('appRequests'))return;
+  try{
+    const data=await api('/api/applications');
+    const pending=data.requests.filter(r=>r.status==='pending');
+    document.getElementById('appPendingCount').textContent=pending.length;
+    const badge=document.getElementById('appRequestBadge');badge.textContent=pending.length;badge.classList.toggle('hidden',!pending.length);
+    const snapshot=JSON.stringify(data);
+    if(!force && snapshot===lastApplicationSnapshot)return;
+    // Keep any scope dropdown currently being edited when the 5-second heartbeat fires.
+    if(!force && document.activeElement?.closest?.('#appRequests'))return;
+    lastApplicationSnapshot=snapshot;
+    const requests=document.getElementById('appRequests');
+    requests.innerHTML=pending.length?`<div class="app-wrap"><table class="app-table"><thead><tr><th>Application</th><th>Requested by</th><th>Signature</th><th>Decision</th></tr></thead><tbody>${pending.map(r=>`<tr>
+      <td><b>${esc(r.file_name)}</b><div class="meta">${esc(r.file_path)}</div><details><summary class="muted small">Fingerprint & signer details</summary><div class="fingerprint">SHA-256: ${esc(r.sha256)}</div><div class="meta">Certificate: ${esc(r.signer_thumbprint||'None')}<br>Subject: ${esc(r.signer_subject||'—')}<br>Issuer: ${esc(r.signer_issuer||'—')}</div></details></td>
+      <td>${esc(r.child_name)}<div class="meta">${esc(r.device_name)}</div>${r.reason?`<div class="meta">“${esc(r.reason)}”</div>`:''}</td>
+      <td><span class="signature sig-${escAttr(r.signature_status)}">${esc(r.signature_status)}</span><div class="meta">${esc(r.publisher||'Unknown publisher')}</div></td>
+      <td><div class="row-actions"><select id="app-scope-${r.id}" aria-label="Approval scope"><option value="device">This device</option><option value="child">Child's devices</option>${r.signature_status==='valid'&&r.signer_thumbprint?'<option value="global">Entire family</option>':''}</select><button class="accept" onclick="decideApplication(${r.id},'approved')">Approve</button><button class="warn" onclick="decideApplication(${r.id},'denied')">Deny</button></div></td>
+    </tr>`).join('')}</tbody></table></div>`:'<div class="app-empty">All caught up — no pending application requests.</div>';
+    const approvals=document.getElementById('appApprovals');
+    approvals.innerHTML=data.approvals.length?`<div class="app-wrap"><table class="app-table"><thead><tr><th>Application</th><th>Scope</th><th>Fingerprint</th><th></th></tr></thead><tbody>${data.approvals.map(a=>`<tr><td><b>${esc(a.file_name)}</b><div class="meta">${esc(a.publisher||'Unsigned / unknown')}</div></td><td>${esc(a.scope==='global'?'Entire family':a.scope==='child'?'Child devices':'One device')}</td><td><span class="fingerprint">${esc(a.sha256.substring(0,20))}…</span></td><td><button class="secondary" onclick="revokeApplication(${a.id})">Revoke</button></td></tr>`).join('')}</tbody></table></div>`:'<div class="app-empty">No active application approvals.</div>';
+    document.getElementById('appHistory').innerHTML=`<div class="app-wrap"><table class="app-table"><tbody>${data.requests.filter(r=>r.status!=='pending').slice(0,30).map(r=>`<tr><td>${esc(r.file_name)}<div class="meta">${esc(r.child_name)} · ${esc(r.device_name)}</div></td><td>${esc(r.status)}</td><td class="muted">${esc(new Date(r.created_at).toLocaleString())}</td></tr>`).join('')}${data.launches.slice(0,15).map(x=>`<tr><td>Launch #${x.request_id}<div class="meta">${esc(x.detail)}</div></td><td>${esc(x.status)}</td><td class="muted">${esc(new Date(x.created_at).toLocaleString())}</td></tr>`).join('')}</tbody></table></div>`;
+  }catch(e){document.getElementById('appRequests').textContent=`Unable to load applications: ${e.message}`}
+}
+async function decideApplication(id,decision){
+  const scope=document.getElementById(`app-scope-${id}`)?.value||'device';
+  if(decision==='denied'&&!confirm('Deny this request?'))return;
+  if(decision==='approved'&&scope==='global'&&!confirm('Approve this exact signed binary for ALL family devices?'))return;
+  try{await api(`/api/applications/requests/${id}/decision`,{method:'POST',body:JSON.stringify({decision,scope})});lastApplicationSnapshot='';await loadApplications(true)}catch(e){alert(e.message)}
+}
+async function revokeApplication(id){if(!confirm('Revoke this approval?'))return;try{await api(`/api/applications/approvals/${id}`,{method:'DELETE'});lastApplicationSnapshot='';await loadApplications(true)}catch(e){alert(e.message)}}
 
 (async()=>{try{await refresh();loginPanel.classList.add('hidden');appPanel.classList.remove('hidden');showView(currentView);if(!refreshTimer)refreshTimer=setInterval(refresh,5000)}catch{}})();

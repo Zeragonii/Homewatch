@@ -13,11 +13,39 @@ namespace HomeWatchAgent;
 
 internal static class Program
 {
+    // A shared per-session signal lets Start Menu's My Apps shortcut open the
+    // existing tray agent instead of starting a second monitoring instance.
+    internal const string OpenAppsEvent = @"Local\HomeWatchOpenApps";
+    internal const string SingleAgentMutex = @"Local\HomeWatchAgentSingleInstance";
+
     [STAThread]
-    static void Main()
+    static void Main(string[] args)
     {
-        ApplicationConfiguration.Initialize();
-        Application.Run(new AgentContext());
+        bool openPortal = args.Any(x => x.Equals("--apps", StringComparison.OrdinalIgnoreCase));
+        using var singleton = new Mutex(true, SingleAgentMutex, out bool firstInstance);
+        if (!firstInstance)
+        {
+            if (openPortal)
+            {
+                // The signal may take a moment to appear during startup.
+                for (int attempt = 0; attempt < 8; attempt++)
+                {
+                    if (EventWaitHandle.TryOpenExisting(OpenAppsEvent, out var signal))
+                    {
+                        using (signal) signal.Set();
+                        break;
+                    }
+                    Thread.Sleep(150);
+                }
+            }
+            return;
+        }
+        try
+        {
+            ApplicationConfiguration.Initialize();
+            Application.Run(new AgentContext(openPortal));
+        }
+        finally { try { singleton.ReleaseMutex(); } catch (ApplicationException) { } }
     }
 }
 
@@ -38,6 +66,9 @@ public sealed class AgentContext : ApplicationContext
     readonly string logDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "HomeWatch");
     readonly HttpClient http = new() { Timeout = TimeSpan.FromSeconds(30) };
     readonly NotifyIcon tray;
+    private AppPortalForm? appPortal;
+    private readonly EventWaitHandle portalSignal;
+    private readonly System.Windows.Forms.Timer portalSignalTimer;
     AgentConfig config = new();
     readonly Dictionary<string, int> usage = new(StringComparer.OrdinalIgnoreCase);
     string currentApp = "";
@@ -52,13 +83,19 @@ public sealed class AgentContext : ApplicationContext
     DateTime lastPolicyEnforcement = DateTime.MinValue;
     string lastPolicyNotice = "";
 
-    public AgentContext()
+    public AgentContext(bool openPortalAtStartup = false)
     {
+        portalSignal = new EventWaitHandle(false, EventResetMode.AutoReset, Program.OpenAppsEvent);
+        portalSignalTimer = new System.Windows.Forms.Timer { Interval = 350 };
+        portalSignalTimer.Tick += (_, _) => { if (portalSignal.WaitOne(0)) ShowAppPortal(); };
+        portalSignalTimer.Start();
         Directory.CreateDirectory(dataDir);
         Directory.CreateDirectory(logDir);
         tray = new NotifyIcon { Icon = SystemIcons.Shield, Visible = true, Text = "HomeWatch Agent" };
         var menu = new ContextMenuStrip();
+        menu.Items.Add("My apps && requests", null, (_, _) => ShowAppPortal());
         menu.Items.Add("Status", null, (_, _) => ShowStatus());
+        tray.DoubleClick += (_, _) => ShowAppPortal();
         menu.Items.Add("Exit", null, (_, _) => { tray.Visible = false; Application.Exit(); });
         tray.ContextMenuStrip = menu;
 
@@ -73,6 +110,7 @@ public sealed class AgentContext : ApplicationContext
         // All-user autostart is provisioned by the elevated installer (HKLM Run).
         // Don't create a per-user HKCU Run key here.
         _ = LoopAsync();
+        if (openPortalAtStartup) portalSignal.Set();
     }
 
     void LoadOrCreateConfig()
@@ -485,6 +523,21 @@ public sealed class AgentContext : ApplicationContext
             Log($"Service update request failed: {ex.Message}");
             if (commandId.HasValue) await CompleteAsync(commandId.Value, "updater request failed: " + ex.Message);
         }
+    }
+
+    void ShowAppPortal()
+    {
+        if (string.IsNullOrWhiteSpace(config.DeviceId) || string.IsNullOrWhiteSpace(config.DeviceToken))
+        {
+            MessageBox.Show("HomeWatch is waiting for a parent to approve this PC. Please try again after enrolment.", "HomeWatch");
+            return;
+        }
+        if (appPortal is null || appPortal.IsDisposed)
+        {
+            appPortal = new AppPortalForm(config.ServerUrl, config.DeviceId, config.DeviceToken);
+            appPortal.Show();
+        }
+        else { appPortal.Show(); appPortal.Activate(); appPortal.BringToFront(); }
     }
 
     void ShowStatus() => MessageBox.Show($"Server: {config.ServerUrl}\nDevice: {config.DeviceId ?? "Awaiting approval"}\nVersion: {AgentVersion}\nUser: {LoggedInUser()}\nCurrent app: {currentApp}", "HomeWatch Agent");

@@ -8,7 +8,7 @@ import uuid
 import json
 import urllib.request
 from datetime import date, datetime, timedelta, timezone, time as dt_time
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Optional
 from zoneinfo import ZoneInfo
 
@@ -17,7 +17,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from itsdangerous import BadSignature, URLSafeSerializer
 from pydantic import BaseModel
-from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, create_engine, inspect, select, text
+from sqlalchemy import BigInteger, Boolean, Date, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, create_engine, inspect, select, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship, sessionmaker
 
 APP_TITLE = os.getenv("APP_TITLE", "HomeWatch")
@@ -161,6 +161,56 @@ class AgentRelease(Base):
     promoted: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
+
+
+
+# v0.4 application approval. This is a normal-user launcher, NOT an elevation broker.
+class ApplicationRequest(Base):
+    __tablename__ = "application_requests"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    device_id: Mapped[str] = mapped_column(ForeignKey("devices.id"), index=True)
+    child_id: Mapped[int] = mapped_column(ForeignKey("children.id"), index=True)
+    file_name: Mapped[str] = mapped_column(String(255))
+    file_path: Mapped[str] = mapped_column(Text)
+    sha256: Mapped[str] = mapped_column(String(64), index=True)
+    file_size: Mapped[int] = mapped_column(BigInteger)
+    signature_status: Mapped[str] = mapped_column(String(20))
+    publisher: Mapped[str] = mapped_column(String(255), default="")
+    signer_thumbprint: Mapped[str] = mapped_column(String(64), default="")
+    signer_subject: Mapped[str] = mapped_column(String(500), default="")
+    signer_issuer: Mapped[str] = mapped_column(String(500), default="")
+    reason: Mapped[str] = mapped_column(String(500), default="")
+    status: Mapped[str] = mapped_column(String(20), default="pending")
+    decision_scope: Mapped[str] = mapped_column(String(20), default="")
+    reviewed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+class ApplicationApproval(Base):
+    __tablename__ = "application_approvals"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    request_id: Mapped[int] = mapped_column(ForeignKey("application_requests.id"))
+    # device, child, global; scope_id null for global
+    scope: Mapped[str] = mapped_column(String(20))
+    device_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
+    child_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    file_name: Mapped[str] = mapped_column(String(255))
+    sha256: Mapped[str] = mapped_column(String(64), index=True)
+    signature_status: Mapped[str] = mapped_column(String(20))
+    signer_thumbprint: Mapped[str] = mapped_column(String(64), default="")
+    publisher: Mapped[str] = mapped_column(String(255), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+class ApplicationLaunch(Base):
+    __tablename__ = "application_launches"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    device_id: Mapped[str] = mapped_column(ForeignKey("devices.id"))
+    request_id: Mapped[int] = mapped_column(ForeignKey("application_requests.id"))
+    approval_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    status: Mapped[str] = mapped_column(String(20))
+    detail: Mapped[str] = mapped_column(String(255), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 Base.metadata.create_all(engine)
 
@@ -441,7 +491,13 @@ def dashboard(db: Session = Depends(db_session)):
                 "completed_at": row.completed_at.isoformat() if row.completed_at else None,
             })
     now = datetime.now(timezone.utc)
+    pending_app_rows = db.scalars(select(ApplicationRequest).where(ApplicationRequest.status == "pending")).all()
+    pending_app_count = sum(1 for r in pending_app_rows if not matching_approval(db, db.get(Device, r.device_id), {
+        "file_name": r.file_name, "sha256": r.sha256,
+        "signature_status": r.signature_status, "signer_thumbprint": r.signer_thumbprint
+    }))
     return {
+        "pending_application_requests": pending_app_count,
         "children": [{"id": c.id, "name": c.name} for c in children],
         "pending": [
             {
@@ -845,3 +901,186 @@ def update_manifest(refresh: bool = False, device: Device = Depends(agent_auth),
     if release:
         return {"available": True, "version": release.version, "url": release.url, "sha256": release.sha256}
     return github_release_manifest(force=refresh) or {"available": False}
+
+
+
+# ----------------------------- Applications v0.4 -----------------------------
+# These APIs grant HomeWatch catalogue/launcher access only. They never confer
+# administrator rights. Client-supplied metadata is untrusted and must not be
+# used as an authorization basis for privileged code execution.
+class ApplicationCandidate(BaseModel):
+    file_name: str
+    file_path: str
+    sha256: str
+    file_size: int
+    signature_status: str = "unknown"
+    publisher: str = ""
+    signer_thumbprint: str = ""
+    signer_subject: str = ""
+    signer_issuer: str = ""
+    reason: str = ""
+
+class ApplicationDecision(BaseModel):
+    decision: str  # approved or denied
+    scope: str = "device"  # device, child, global
+
+class ApplicationLaunchResult(BaseModel):
+    request_id: int
+    status: str  # started / failed
+    detail: str = ""
+
+
+def normalise_app(body: ApplicationCandidate) -> dict:
+    file_name = body.file_name.strip()
+    file_path = body.file_path.strip()
+    digest = body.sha256.strip().lower()
+    thumbprint = body.signer_thumbprint.strip().lower()
+    sig = body.signature_status.strip().lower()
+    if (not file_name or len(file_name) > 255 or not file_name.lower().endswith('.exe') or
+        '/' in file_name or '\\' in file_name or '\x00' in file_name):
+        raise HTTPException(400, "A Windows executable filename is required")
+    if (not file_path or len(file_path) > 2048 or '\x00' in file_path or
+        not PureWindowsPath(file_path).is_absolute() or
+        PureWindowsPath(file_path).name.casefold() != file_name.casefold()):
+        raise HTTPException(400, "Invalid Windows executable path")
+    if len(digest) != 64 or any(c not in '0123456789abcdef' for c in digest):
+        raise HTTPException(400, "Valid SHA-256 fingerprint required")
+    if sig not in ('valid', 'unsigned', 'invalid', 'unknown'):
+        raise HTTPException(400, "Invalid signature state")
+    if thumbprint and (len(thumbprint) > 64 or any(c not in '0123456789abcdef' for c in thumbprint)):
+        raise HTTPException(400, "Invalid signer thumbprint")
+    if body.file_size < 0 or body.file_size > 2**63-1:
+        raise HTTPException(400, "Invalid file size")
+    return dict(file_name=file_name, file_path=file_path, sha256=digest,
+                file_size=body.file_size, signature_status=sig,
+                publisher=body.publisher.strip()[:255], signer_thumbprint=thumbprint,
+                signer_subject=body.signer_subject.strip()[:500],
+                signer_issuer=body.signer_issuer.strip()[:500], reason=body.reason.strip()[:500])
+
+
+def matching_approval(db: Session, device: Device, info: dict) -> Optional[ApplicationApproval]:
+    # A signer thumbprint is not authorization on its own: binary hash must match.
+    rows = db.scalars(select(ApplicationApproval).where(
+        ApplicationApproval.sha256 == info['sha256'],
+        ApplicationApproval.file_name == info['file_name'],
+        ApplicationApproval.signature_status == info['signature_status'],
+        ApplicationApproval.signer_thumbprint == info['signer_thumbprint'])).all()
+    for a in rows:
+        if a.scope == 'global' or a.scope == 'child' and a.child_id == device.child_id or a.scope == 'device' and a.device_id == device.id:
+            return a
+    return None
+
+
+def request_json(row: ApplicationRequest, db: Session, device: Device | None = None) -> dict:
+    d = device or db.get(Device, row.device_id)
+    info = {k: getattr(row, k) for k in ('file_name', 'sha256', 'signature_status', 'signer_thumbprint')}
+    approval = matching_approval(db, d, info) if d else None
+    status = 'approved' if approval else ('revoked' if row.status == 'approved' else row.status)
+    return {
+        'id': row.id, 'device_id': row.device_id, 'device_name': d.name if d else '',
+        'child_id': row.child_id, 'child_name': db.get(Child,row.child_id).name if db.get(Child,row.child_id) else '',
+        'file_name': row.file_name, 'file_path': row.file_path, 'sha256': row.sha256,
+        'file_size': row.file_size, 'signature_status': row.signature_status,
+        'publisher': row.publisher, 'signer_thumbprint': row.signer_thumbprint,
+        'signer_subject': row.signer_subject, 'signer_issuer': row.signer_issuer,
+        'reason': row.reason, 'status': status, 'approval_scope': approval.scope if approval else '',
+        'created_at': row.created_at.isoformat(), 'reviewed_at': row.reviewed_at.isoformat() if row.reviewed_at else None
+    }
+
+@app.post('/agent/applications/requests')
+def agent_application_request(body: ApplicationCandidate, device: Device = Depends(agent_auth), db: Session = Depends(db_session)):
+    info = normalise_app(body)
+    previous = db.scalar(select(ApplicationRequest).where(
+        ApplicationRequest.device_id == device.id,
+        ApplicationRequest.sha256 == info['sha256'],
+        ApplicationRequest.file_path == info['file_path'],
+        ApplicationRequest.status == 'pending').order_by(ApplicationRequest.id.desc()))
+    if previous: return request_json(previous, db, device)
+    approval = matching_approval(db, device, info)
+    row = ApplicationRequest(device_id=device.id, child_id=device.child_id, **info,
+                             status='approved' if approval else 'pending',
+                             decision_scope=approval.scope if approval else '')
+    db.add(row); db.commit(); db.refresh(row)
+    return request_json(row, db, device)
+
+@app.get('/agent/applications')
+def agent_applications(device: Device = Depends(agent_auth), db: Session = Depends(db_session)):
+    rows = db.scalars(select(ApplicationRequest).where(ApplicationRequest.device_id == device.id)
+                      .order_by(ApplicationRequest.id.desc()).limit(100)).all()
+    return {'applications': [request_json(row, db, device) for row in rows]}
+
+@app.post('/agent/applications/{request_id}/verify')
+def agent_application_verify(request_id: int, body: ApplicationCandidate,
+                              device: Device = Depends(agent_auth), db: Session = Depends(db_session)):
+    row = db.get(ApplicationRequest, request_id)
+    if not row or row.device_id != device.id: raise HTTPException(404, 'Application request not found')
+    info = normalise_app(body)
+    if info['file_path'] != row.file_path or info['sha256'] != row.sha256 or info['file_name'] != row.file_name:
+        raise HTTPException(409, 'Application file changed; submit a new request')
+    if info['signature_status'] != row.signature_status or info['signer_thumbprint'] != row.signer_thumbprint:
+        raise HTTPException(409, 'Application signature changed; submit a new request')
+    approval = matching_approval(db, device, info)
+    if not approval: raise HTTPException(403, 'This application is not currently approved')
+    return {'approved': True, 'approval_id': approval.id, 'scope': approval.scope, 'elevated': False}
+
+@app.post('/agent/applications/launched')
+def agent_application_launched(body: ApplicationLaunchResult,
+                               device: Device = Depends(agent_auth), db: Session = Depends(db_session)):
+    row = db.get(ApplicationRequest, body.request_id)
+    if not row or row.device_id != device.id: raise HTTPException(404, 'Application request not found')
+    if body.status not in ('started', 'failed'): raise HTTPException(400, 'Invalid launch status')
+    if body.status == 'started' and not matching_approval(db, device, {
+        'file_name': row.file_name, 'sha256': row.sha256,
+        'signature_status': row.signature_status, 'signer_thumbprint': row.signer_thumbprint
+    }):
+        raise HTTPException(403, 'Application not approved')
+    db.add(ApplicationLaunch(device_id=device.id, request_id=row.id,
+                             status=body.status[:20], detail=body.detail[:255]))
+    db.commit()
+    return {'ok': True}
+
+@app.get('/api/applications', dependencies=[Depends(require_admin)])
+def admin_applications(db: Session = Depends(db_session)):
+    rows = db.scalars(select(ApplicationRequest).order_by(ApplicationRequest.id.desc()).limit(250)).all()
+    approvals = db.scalars(select(ApplicationApproval).order_by(ApplicationApproval.id.desc()).limit(250)).all()
+    launches = db.scalars(select(ApplicationLaunch).order_by(ApplicationLaunch.id.desc()).limit(30)).all()
+    return {
+        'requests': [request_json(row,db) for row in rows],
+        'approvals': [dict(id=a.id, file_name=a.file_name, sha256=a.sha256, publisher=a.publisher,
+                           signature_status=a.signature_status, scope=a.scope, device_id=a.device_id,
+                           child_id=a.child_id, created_at=a.created_at.isoformat()) for a in approvals],
+        'launches': [dict(id=x.id, device_id=x.device_id, request_id=x.request_id,
+                          status=x.status, detail=x.detail, created_at=x.created_at.isoformat()) for x in launches]
+    }
+
+@app.post('/api/applications/requests/{request_id}/decision', dependencies=[Depends(require_admin)])
+def decide_application(request_id: int, body: ApplicationDecision, db: Session = Depends(db_session)):
+    row = db.get(ApplicationRequest, request_id)
+    if not row: raise HTTPException(404, 'Application request not found')
+    if row.status != 'pending': raise HTTPException(409, 'Request already reviewed')
+    if body.decision not in ('approved', 'denied'):
+        raise HTTPException(400, 'Invalid decision')
+    if body.decision == 'approved':
+        if db.get(Device, row.device_id).child_id != row.child_id:
+            raise HTTPException(409, 'Device has been reassigned; the child must request this app again')
+        if body.scope not in ('device', 'child', 'global'): raise HTTPException(400, 'Invalid scope')
+        if body.scope == 'global' and (row.signature_status != 'valid' or not row.signer_thumbprint):
+            raise HTTPException(400, 'Global approvals require a client-reported valid signature and signer')
+        db.add(ApplicationApproval(
+            request_id=row.id, scope=body.scope,
+            device_id=row.device_id if body.scope == 'device' else None,
+            child_id=db.get(Device,row.device_id).child_id if body.scope == 'child' else None,
+            file_name=row.file_name, sha256=row.sha256, signature_status=row.signature_status,
+            signer_thumbprint=row.signer_thumbprint, publisher=row.publisher))
+        row.decision_scope = body.scope
+    row.status = body.decision
+    row.reviewed_at = datetime.now(timezone.utc)
+    db.commit()
+    return {'ok': True}
+
+@app.delete('/api/applications/approvals/{approval_id}', dependencies=[Depends(require_admin)])
+def revoke_application(approval_id: int, db: Session = Depends(db_session)):
+    approval = db.get(ApplicationApproval, approval_id)
+    if not approval: raise HTTPException(404, 'Approval not found')
+    db.delete(approval); db.commit()
+    return {'ok': True}

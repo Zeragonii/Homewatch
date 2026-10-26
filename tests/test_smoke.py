@@ -1,5 +1,9 @@
 import os
-os.environ.setdefault("DATABASE_URL", "sqlite:///./test-homewatch.db")
+import tempfile
+# Isolate runs so previous approvals/child assignments never bleed into new tests.
+_test_db = tempfile.NamedTemporaryFile(prefix="hw-tests-", suffix=".db", delete=False)
+_test_db.close()
+os.environ.setdefault("DATABASE_URL", "sqlite:///" + _test_db.name)
 os.environ.setdefault("ADMIN_USERNAME", "admin")
 os.environ.setdefault("ADMIN_PASSWORD", "testpass")
 os.environ.setdefault("SESSION_SECRET", "test-secret")
@@ -123,3 +127,80 @@ def test_question_reply_round_trip_reaches_dashboard():
     message=next(c for c in device['commands'] if c['id']==command_id)
     assert message['status']=='complete'
     assert message['result']=='Reply: Yes, one minute'
+
+
+def _make_app_device(child_id=None):
+    import uuid
+    from server.app.main import SessionLocal, Device, sha256_text
+    if child_id is None:
+        child_id = client.post('/api/children', json={'name':'Apps Kid '+uuid.uuid4().hex[:8]}).json()['id']
+    device_id = str(uuid.uuid4())
+    token = 'app-token-' + uuid.uuid4().hex
+    with SessionLocal() as db:
+        db.add(Device(id=device_id, child_id=child_id, name='App Test PC',
+                      installation_id=str(uuid.uuid4()), token_hash=sha256_text(token),
+                      hostname='PC', os_version='Windows 11', agent_version='0.4.0'))
+        db.commit()
+    return device_id, {'X-Device-Id':device_id, 'Authorization':f'Bearer {token}'}
+
+
+def _app_candidate(hash_char='a', sig='valid', path=r'C:\Games\Play.exe'):
+    return dict(file_name='Play.exe',file_path=path,sha256=hash_char*64,
+                file_size=123456,signature_status=sig,publisher='Example Games' if sig=='valid' else '',
+                signer_thumbprint='f'*40 if sig=='valid' else '',
+                signer_subject='CN=Example Games', signer_issuer='CN=Example CA',reason='Looks fun')
+
+
+def test_app_request_approval_verify_and_revoke():
+    first, headers = _make_app_device()
+    candidate = _app_candidate()
+    unauthed = client.post('/agent/applications/requests',json=candidate)
+    assert unauthed.status_code == 422 or unauthed.status_code == 401
+    queued = client.post('/agent/applications/requests',headers=headers,json=candidate)
+    assert queued.status_code == 200, queued.text
+    request_id = queued.json()['id']
+    assert queued.json()['status']=='pending'
+    assert client.post(f'/agent/applications/{request_id}/verify',headers=headers,json=candidate).status_code == 403
+    assert client.post(f'/api/applications/requests/{request_id}/decision',json={'decision':'approved','scope':'device'}).status_code == 200
+    verified = client.post(f'/agent/applications/{request_id}/verify',headers=headers,json=candidate)
+    assert verified.status_code == 200 and verified.json()['elevated'] is False
+    changed = {**candidate,'sha256':'b'*64}
+    assert client.post(f'/agent/applications/{request_id}/verify',headers=headers,json=changed).status_code == 409
+    apps = client.get('/api/applications').json()
+    match = next(a for a in apps['approvals'] if a['request_id']==request_id) if 'request_id' in (apps['approvals'][0] if apps['approvals'] else {}) else next(a for a in apps['approvals'] if a['sha256']==candidate['sha256'])
+    assert client.delete(f"/api/applications/approvals/{match['id']}").status_code == 200
+    assert client.post(f'/agent/applications/{request_id}/verify',headers=headers,json=candidate).status_code == 403
+    assert client.get('/agent/applications',headers=headers).json()['applications'][0]['status'] == 'revoked'
+
+
+def test_app_scope_global_signed_only_and_child_scope():
+    device_a, headers_a = _make_app_device()
+    device_b, headers_b = _make_app_device()
+    unsigned = _app_candidate('c', 'unsigned')
+    r = client.post('/agent/applications/requests',headers=headers_a,json=unsigned)
+    assert r.status_code == 200
+    req_id = r.json()['id']
+    r = client.post(f'/api/applications/requests/{req_id}/decision',json={'decision':'approved','scope':'global'})
+    assert r.status_code == 400
+    signed = _app_candidate('d')
+    r = client.post('/agent/applications/requests',headers=headers_a,json=signed)
+    req_id = r.json()['id']
+    assert client.post(f'/api/applications/requests/{req_id}/decision',json={'decision':'approved','scope':'global'}).status_code == 200
+    # Global approval applies to the SAME signed binary on another enrolled PC.
+    r = client.post('/agent/applications/requests',headers=headers_b,json={**signed,'file_path':r'C:\Different\Play.exe'})
+    assert r.status_code == 200 and r.json()['status'] == 'approved'
+    assert client.post(f"/agent/applications/{r.json()['id']}/verify",headers=headers_b,json={**signed,'file_path':r'C:\Different\Play.exe'}).status_code == 200
+    # Different binary, same filename and signer, is NOT approved.
+    r = client.post('/agent/applications/requests',headers=headers_b,json={**signed,'sha256':'e'*64})
+    assert r.status_code == 200 and r.json()['status'] == 'pending'
+
+
+def test_launch_audit_is_device_scoped():
+    device_a, headers_a = _make_app_device()
+    device_b, headers_b = _make_app_device()
+    queued = client.post('/agent/applications/requests',headers=headers_a,json=_app_candidate('9')).json()
+    body={'request_id':queued['id'],'status':'failed','detail':'No administrator access'}
+    assert client.post('/agent/applications/launched',headers=headers_b,json=body).status_code == 404
+    assert client.post('/agent/applications/launched',headers=headers_a,json=body).status_code == 200
+    audit=client.get('/api/applications').json()['launches']
+    assert any(x['request_id']==queued['id'] and x['status']=='failed' for x in audit)

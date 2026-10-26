@@ -1,5 +1,5 @@
 #ifndef MyAppVersion
-  #define MyAppVersion "0.3.8"
+  #define MyAppVersion "0.4.0"
 #endif
 #define MyAppName "HomeWatch Agent"
 #define MyAppPublisher "HomeWatch"
@@ -45,8 +45,13 @@ Root: HKLM; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: 
 ; Remove older per-user autoruns for the account performing the upgrade.
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: none; ValueName: "HomeWatchAgent"; Flags: deletevalue
 
+[Tasks]
+Name: "myappsdesktop"; Description: "Create a My Apps shortcut on the desktop"; Flags: unchecked
+
 [Icons]
 Name: "{autoprograms}\HomeWatch Agent"; Filename: "{app}\{#MyAppExeName}"
+Name: "{autoprograms}\HomeWatch My Apps"; Filename: "{app}\{#MyAppExeName}"; Parameters: "--apps"
+Name: "{commondesktop}\HomeWatch My Apps"; Filename: "{app}\{#MyAppExeName}"; Parameters: "--apps"; Tasks: myappsdesktop
 
 [UninstallRun]
 Filename: "{sys}\sc.exe"; Parameters: "stop HomeWatchUpdaterService"; Flags: runhidden waituntilterminated; RunOnceId: "StopHomeWatchService"

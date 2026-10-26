@@ -13,6 +13,20 @@ permissions:
   packages: write
 
 jobs:
+  server-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install test dependencies
+        run: pip install -r server/requirements.txt httpx pytest
+      - name: Test API flows
+        run: PYTHONPATH=. pytest -q tests
+      - name: Validate frontend script
+        run: node --check server/app/static/app.js
+
   windows-agent:
     runs-on: windows-latest
     steps:
@@ -28,7 +42,7 @@ jobs:
           if ($env:GITHUB_REF -like 'refs/tags/v*') {
             $version = $env:GITHUB_REF_NAME.Substring(1)
           } else {
-            $version = '0.3.10'
+            $version = '0.4.0'
           }
           "HOMEWATCH_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           Write-Host "Building HomeWatch Agent $version"
@@ -61,7 +75,19 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "HomeWatchUpdater publish failed ($LASTEXITCODE)" }
           Copy-Item out/updater/HomeWatchUpdater.exe out/agent/HomeWatchUpdater.exe -Force
           # Add Authenticode signing here once a signing certificate is configured.
-          Compress-Archive -Path out/agent/* -DestinationPath HomeWatch-Agent-win-x64.zip -Force
+          # The privileged updater rejects unexpected archive members. Ship
+          # exactly these three root-level executables (no PDBs or sidecars).
+          $allowed = @('HomeWatchAgent.exe', 'HomeWatchService.exe', 'HomeWatchUpdater.exe')
+          $paths = @($allowed | ForEach-Object { "out/agent/$_" })
+          foreach ($file in $paths) { if (-not (Test-Path $file)) { throw "Missing expected output: $file" } }
+          Compress-Archive -LiteralPath $paths -DestinationPath HomeWatch-Agent-win-x64.zip -Force
+          Add-Type -AssemblyName System.IO.Compression
+          $zip = [System.IO.Compression.ZipFile]::OpenRead((Join-Path $PWD 'HomeWatch-Agent-win-x64.zip'))
+          try {
+            $actual = @($zip.Entries | ForEach-Object { $_.FullName } | Sort-Object)
+            $expected = @($allowed | Sort-Object)
+            if ((Compare-Object $actual $expected).Count -ne 0) { throw "Unexpected update archive contents: $($actual -join ', ')" }
+          } finally { $zip.Dispose() }
           (Get-FileHash HomeWatch-Agent-win-x64.zip -Algorithm SHA256).Hash.ToLower() | Out-File -Encoding ascii HomeWatch-Agent-win-x64.sha256
 
       - name: Install Inno Setup
