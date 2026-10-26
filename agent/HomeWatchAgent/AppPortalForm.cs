@@ -46,7 +46,7 @@ public sealed class AppPortalForm : Form
         BackColor = Background;
         ForeColor = TextColor;
         Font = new Font("Segoe UI", 10);
-        Icon = Program.LoadBrandIcon();
+        Icon = AgentContext.LoadBrandIcon();
 
         var root = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(25, 18, 25, 16), ColumnCount = 1, RowCount = 3, BackColor = Background };
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 108));

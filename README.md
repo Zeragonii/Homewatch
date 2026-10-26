@@ -251,3 +251,8 @@ See `RELEASE-v0.4.3a.md` for the one-time migration procedure. Publish using num
 ### v0.4.3b artwork hotfix
 
 See `RELEASE-v0.4.3b.md` for server-only deployment instructions and the first-save artwork regression fix.
+
+
+### v0.4.4a (numeric release v0.4.4.1): Windows build correction
+
+Corrected the application icon call in the child-facing launcher to reference the `AgentContext` helper where it actually lives. See `RELEASE-v0.4.4a.md`.

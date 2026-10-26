@@ -19,3 +19,11 @@ def test_executable_embeds_application_icon():
     csproj = (ROOT / "agent/HomeWatchAgent/HomeWatchAgent.csproj").read_text()
     assert '<ApplicationIcon>HomeWatch.ico</ApplicationIcon>' in csproj
     assert (ROOT / "agent/HomeWatchAgent/HomeWatch.ico").exists()
+
+
+def test_portal_uses_its_defined_icon_helper():
+    form = (ROOT / "agent/HomeWatchAgent/AppPortalForm.cs").read_text()
+    agent = (ROOT / "agent/HomeWatchAgent/Program.cs").read_text()
+    assert 'Icon = AgentContext.LoadBrandIcon();' in form
+    assert 'Icon = Program.LoadBrandIcon();' not in form
+    assert 'internal static Icon LoadBrandIcon()' in agent
