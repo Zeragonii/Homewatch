@@ -216,6 +216,7 @@ async function deleteAppLimit(id){await api(`/api/app-limits/${id}`,{method:'DEL
 let lastApplicationSnapshot='';
 async function loadApplications(force=false){
   if(!document.getElementById('appRequests'))return;
+  await loadCatalogue(force);
   try{
     const data=await api('/api/applications');
     const pending=data.requests.filter(r=>r.status==='pending');
@@ -247,6 +248,61 @@ async function decideApplication(id,decision){
 }
 async function revokeApplication(id){if(!confirm('Revoke this approval?'))return;try{await api(`/api/applications/approvals/${id}`,{method:'DELETE'});lastApplicationSnapshot='';await loadApplications(true)}catch(e){alert(e.message)}}
 
+// Centrally published installers. No local administrator elevation is granted.
+let lastCatalogueData={items:[],attempts:[]};
+let lastCatalogueSnapshot='';
+let editingCatalogueId=null;
+async function loadCatalogue(force=false){
+  const container=document.getElementById('catalogueItems');if(!container)return;
+  try{
+    const data=await api('/api/catalogue');lastCatalogueData=data;
+    const snapshot=JSON.stringify(data);
+    if(!force&&(snapshot===lastCatalogueSnapshot||document.activeElement?.closest?.('#catalogueItems')))return;
+    lastCatalogueSnapshot=snapshot;
+    container.className='app-wrap';
+    container.innerHTML=data.items.length?`<table class="app-table catalogue-table"><thead><tr><th>App</th><th>Installer</th><th>Visible</th><th>Actions</th></tr></thead><tbody>${data.items.map(a=>`<tr>
+      <td><b>${esc(a.name)}</b><button class="subtle-action" onclick="openAppEditor('${a.installer_sha256}')">Edit tile</button><div class="meta">${esc(a.description||'Available to the household')}</div></td>
+      <td class="catalogue-source"><div class="meta">${esc(a.installer_path)}</div><span class="fingerprint">SHA-256 ${esc(a.installer_sha256.substring(0,18))}…</span></td>
+      <td>${a.enabled?'<span class="online">Published</span>':'<span class="offline">Hidden</span>'}</td>
+      <td><div class="catalogue-row-actions"><button class="secondary" onclick="openCatalogueEditor(${a.id})">Edit</button>${a.enabled?`<button class="warn" onclick="unpublishCatalogueItem(${a.id})">Unpublish</button>`:''}</div></td>
+    </tr>`).join('')}</tbody></table>`:'<div class="app-empty">Nothing published yet. Add your first NAS installer.</div>';
+    const audit=document.getElementById('catalogueAttempts');
+    audit.innerHTML=data.attempts.length?data.attempts.slice(0,25).map(a=>`<div class="command-row"><span>#${a.catalogue_id} · ${esc(a.device_id.substring(0,8))} · ${esc(a.detail)}</span><span class="${a.status==='started'?'online':'error'}">${esc(a.status)}</span></div>`).join(''):'<p class="muted">No install attempts yet.</p>';
+  }catch(e){container.textContent='Could not load household catalogue: '+e.message;}
+}
+function openCatalogueEditor(id=null){
+  editingCatalogueId=id;
+  const item=lastCatalogueData.items.find(x=>x.id===id);
+  document.getElementById('catalogueEditorTitle').textContent=item?'Edit household app':'Publish to the family';
+  document.getElementById('catalogueName').value=item?.name||'';
+  document.getElementById('cataloguePath').value=item?.installer_path||'';
+  document.getElementById('catalogueHash').value=item?.installer_sha256||'';
+  document.getElementById('catalogueDescription').value=item?.description||'';
+  document.getElementById('catalogueEnabled').checked=item?.enabled??true;
+  document.getElementById('catalogueFeedback').textContent='';
+  document.getElementById('catalogueEditor').showModal();
+}
+async function saveCatalogueItem(event){
+  event.preventDefault();
+  const btn=document.getElementById('catalogueSaveButton'),error=document.getElementById('catalogueFeedback');
+  btn.disabled=true;error.textContent='';
+  try{
+    const body={name:document.getElementById('catalogueName').value.trim(),
+      installer_path:document.getElementById('cataloguePath').value.trim(),
+      installer_sha256:document.getElementById('catalogueHash').value.trim(),
+      description:document.getElementById('catalogueDescription').value.trim(),
+      enabled:document.getElementById('catalogueEnabled').checked};
+    await api(editingCatalogueId?`/api/catalogue/${editingCatalogueId}`:'/api/catalogue',
+      {method:editingCatalogueId?'PUT':'POST',body:JSON.stringify(body)});
+    document.getElementById('catalogueEditor').close();
+    lastCatalogueSnapshot='';await loadCatalogue(true);
+  }catch(e){error.textContent=e.message;}finally{btn.disabled=false;}
+}
+async function unpublishCatalogueItem(id){
+  if(!confirm('Remove this installer from all HomeWatch launchers? Previous install history stays intact.'))return;
+  try{await api(`/api/catalogue/${id}`,{method:'DELETE'});lastCatalogueSnapshot='';await loadCatalogue(true)}catch(e){alert(e.message)}
+}
+
 (async()=>{try{await refresh();loginPanel.classList.add('hidden');appPanel.classList.remove('hidden');showView(currentView);if(!refreshTimer)refreshTimer=setInterval(refresh,5000)}catch{}})();
 
 // Centrally managed display names and SteamGridDB poster selection.
@@ -257,7 +313,8 @@ function artPosterURL(a){return a?.artwork_url||''}
 function closeAppEditor(){document.getElementById('appEditor').close()}
 function editorMessage(s){document.getElementById('appEditorFeedback').textContent=s}
 function openAppEditor(digest){
-  const a=[...(lastApplicationsData.requests||[]),...(lastApplicationsData.approvals||[])].find(r=>r.sha256===digest);
+  const a=[...(lastApplicationsData.requests||[]),...(lastApplicationsData.approvals||[]),
+    ...(lastCatalogueData.items||[]).map(x=>({...x,sha256:x.installer_sha256,display_name:x.name,file_name:x.name}))].find(r=>r.sha256===digest);
   if(!a)return;
   editingDigest=digest;artworkGameId=0;
   document.getElementById('appFriendlyName').value=a.display_name||a.file_name;
@@ -274,7 +331,7 @@ async function saveAppFriendlyName(){
   if(!editingDigest)return;
   try{
     await api(`/api/applications/${editingDigest}/presentation`,{method:'PUT',body:JSON.stringify({display_name:document.getElementById('appFriendlyName').value})});
-    editorMessage('Friendly name saved. Clients will see it on their next refresh.');lastApplicationSnapshot='';await loadApplications(true);
+    editorMessage('Friendly name saved. Clients will see it on their next refresh.');lastApplicationSnapshot='';lastCatalogueSnapshot='';await loadApplications(true);
   }catch(e){editorMessage(e.message)}
 }
 async function searchAppArtwork(){

@@ -220,6 +220,33 @@ class ApplicationPresentation(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 
+class HouseholdCatalogueItem(Base):
+    """Parent-curated, published packages available for install on every enrolled PC.
+
+    Package availability is NOT a Windows elevation grant or permission to launch
+    an arbitrary different executable after installation.
+    """
+    __tablename__ = "household_catalogue"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(120))
+    installer_path: Mapped[str] = mapped_column(String(2048))
+    installer_sha256: Mapped[str] = mapped_column(String(64), index=True)
+    description: Mapped[str] = mapped_column(String(600), default="")
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default=text("1"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+class HouseholdInstallAttempt(Base):
+    __tablename__ = "household_install_attempts"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    catalogue_id: Mapped[int] = mapped_column(ForeignKey("household_catalogue.id"), index=True)
+    device_id: Mapped[str] = mapped_column(ForeignKey("devices.id"), index=True)
+    status: Mapped[str] = mapped_column(String(20))
+    detail: Mapped[str] = mapped_column(String(300), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
 class ApplicationLaunch(Base):
     __tablename__ = "application_launches"
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -1129,6 +1156,153 @@ def revoke_application(approval_id: int, db: Session = Depends(db_session)):
     return {'ok': True}
 
 
+# ------------------------ Household software catalogue v0.4.5 ------------------------
+# A published package is visible to ALL enrolled clients. The file is never
+# fetched/executed by the server or privileged Windows updater service.
+class CatalogueBody(BaseModel):
+    name: str
+    installer_path: str
+    installer_sha256: str
+    description: str = ""
+    enabled: bool = True
+
+
+class InstallAttemptBody(BaseModel):
+    status: str
+    detail: str = ""
+
+
+def canonical_installer_path(value: str) -> str:
+    """Windows UNC share or absolute HTTP(S) URL; no local paths, credentials or traversal."""
+    raw = value.strip()
+    if not raw or len(raw) > 2048 or any(ord(c) < 32 for c in raw):
+        raise HTTPException(400, "Installer path is missing or invalid")
+    parsed = urllib.parse.urlsplit(raw)
+    if parsed.scheme.lower() in ("https", "http"):
+        if parsed.username or parsed.password or not parsed.hostname or parsed.fragment or parsed.query or parsed.port not in (None, 80, 443, 8080, 8443):
+            raise HTTPException(400, "Use a direct installer URL without credentials, query parameters or fragments")
+        segments = urllib.parse.unquote(parsed.path).split('/')
+        if any(x in ('.', '..') for x in segments) or not parsed.path.lower().endswith('.exe'):
+            raise HTTPException(400, "Installer URL must point directly to an .exe")
+        return raw
+    if '://' in raw:
+        raise HTTPException(400, "Only Windows SMB shares and HTTP(S) installer URLs are supported")
+    # Permit the convenient 192.168.1.250/installers/Folder/setup.exe notation.
+    if not raw.startswith('\\\\') and not raw.startswith('//'):
+        if not re.match(r'^[a-zA-Z0-9.-]+[/\\][^/\\]+[/\\]', raw):
+            raise HTTPException(400, "Use \\\\SERVER\\share\\folder\\setup.exe or a direct HTTP(S) URL")
+        raw = '\\\\' + raw
+    path = raw.replace('/', '\\')
+    # For safety, require an actual share and at least one file, reject administrative
+    # shares and traversal. Do not allow credentials embedded in a path.
+    parts = [segment for segment in path[2:].split('\\') if segment]
+    if (not path.startswith('\\\\') or len(parts) < 3 or
+        any(x in ('.','..') or ':' in x for x in parts) or
+        parts[1].endswith('$') or not parts[-1].lower().endswith('.exe') or
+        not re.fullmatch(r'[A-Za-z0-9.-]+', parts[0])):
+        raise HTTPException(400, "Enter an accessible UNC share path ending in .exe")
+    return '\\\\' + '\\'.join(parts)
+
+
+def validate_catalogue(body: CatalogueBody) -> dict:
+    name = body.name.strip()
+    desc = body.description.strip()
+    digest = body.installer_sha256.strip().lower()
+    if not (1 <= len(name) <= 120) or any(ord(c) < 32 for c in name):
+        raise HTTPException(400, "Name must contain 1–120 printable characters")
+    if len(desc) > 600 or any(ord(c) < 32 and c not in '\n\r\t' for c in desc):
+        raise HTTPException(400, "Description is too long or invalid")
+    if not re.fullmatch(r'[0-9a-f]{64}', digest):
+        raise HTTPException(400, "Enter the SHA-256 fingerprint of the installer on your NAS")
+    return dict(name=name, installer_path=canonical_installer_path(body.installer_path),
+                installer_sha256=digest, description=desc, enabled=body.enabled)
+
+
+def catalogue_json(db: Session, item: HouseholdCatalogueItem, include_path: bool = True) -> dict:
+    presentation = presentation_json(db, item.installer_sha256, item.name)
+    return dict(id=item.id, name=presentation['display_name'] if presentation['display_name'] else item.name,
+                installer_path=item.installer_path if include_path else None,
+                installer_sha256=item.installer_sha256, description=item.description,
+                enabled=item.enabled, created_at=item.created_at.isoformat(),
+                updated_at=item.updated_at.isoformat(), **{k: v for k,v in presentation.items() if k != 'display_name'})
+
+
+@app.get('/api/catalogue', dependencies=[Depends(require_admin)])
+def admin_catalogue(db: Session = Depends(db_session)):
+    rows = db.scalars(select(HouseholdCatalogueItem).order_by(HouseholdCatalogueItem.id.desc())).all()
+    audit = db.scalars(select(HouseholdInstallAttempt).order_by(HouseholdInstallAttempt.id.desc()).limit(50)).all()
+    return {'items': [catalogue_json(db, row) for row in rows],
+            'attempts': [dict(id=a.id, catalogue_id=a.catalogue_id, device_id=a.device_id,
+                              status=a.status, detail=a.detail, created_at=a.created_at.isoformat()) for a in audit]}
+
+
+@app.post('/api/catalogue', dependencies=[Depends(require_admin)])
+def add_catalogue_item(body: CatalogueBody, db: Session = Depends(db_session)):
+    info = validate_catalogue(body)
+    row = HouseholdCatalogueItem(**info)
+    db.add(row)
+    # Reuse presentation and SteamGridDB artwork mechanism keyed by exact installer digest.
+    existing = db.get(ApplicationPresentation, info['installer_sha256'])
+    if not existing:
+        db.add(ApplicationPresentation(sha256=info['installer_sha256'], display_name=info['name']))
+    db.commit(); db.refresh(row)
+    return catalogue_json(db, row)
+
+
+@app.put('/api/catalogue/{catalogue_id}', dependencies=[Depends(require_admin)])
+def edit_catalogue_item(catalogue_id: int, body: CatalogueBody, db: Session = Depends(db_session)):
+    row = db.get(HouseholdCatalogueItem, catalogue_id)
+    if not row: raise HTTPException(404, 'Catalogue entry not found')
+    info = validate_catalogue(body)
+    for key, value in info.items(): setattr(row, key, value)
+    row.updated_at = datetime.now(timezone.utc)
+    presentation = db.get(ApplicationPresentation, row.installer_sha256)
+    if presentation is None:
+        db.add(ApplicationPresentation(sha256=row.installer_sha256, display_name=row.name))
+    else:
+        presentation.display_name = row.name
+    db.commit(); db.refresh(row)
+    return catalogue_json(db, row)
+
+
+@app.delete('/api/catalogue/{catalogue_id}', dependencies=[Depends(require_admin)])
+def remove_catalogue_item(catalogue_id: int, db: Session = Depends(db_session)):
+    # Unpublish instead of deleting: keep the install audit trail.
+    row = db.get(HouseholdCatalogueItem, catalogue_id)
+    if not row: raise HTTPException(404, 'Catalogue entry not found')
+    row.enabled = False
+    row.updated_at = datetime.now(timezone.utc)
+    db.commit()
+    return {'ok': True}
+
+
+@app.get('/agent/catalogue')
+def agent_catalogue(device: Device = Depends(agent_auth), db: Session = Depends(db_session)):
+    rows = db.scalars(select(HouseholdCatalogueItem).where(
+        HouseholdCatalogueItem.enabled == True).order_by(HouseholdCatalogueItem.name)).all()
+    return {'items': [catalogue_json(db, row) for row in rows]}
+
+
+@app.get('/agent/catalogue/{catalogue_id}')
+def agent_catalogue_item(catalogue_id: int, device: Device = Depends(agent_auth), db: Session = Depends(db_session)):
+    row = db.get(HouseholdCatalogueItem, catalogue_id)
+    if not row or not row.enabled: raise HTTPException(404, 'Package is no longer published')
+    return catalogue_json(db, row)
+
+
+@app.post('/agent/catalogue/{catalogue_id}/attempts')
+def agent_install_attempt(catalogue_id: int, body: InstallAttemptBody,
+                          device: Device = Depends(agent_auth), db: Session = Depends(db_session)):
+    row = db.get(HouseholdCatalogueItem, catalogue_id)
+    if not row: raise HTTPException(404, 'Catalogue entry not found')
+    if body.status not in ('started','failed','hash_mismatch'):
+        raise HTTPException(400, 'Invalid install attempt status')
+    db.add(HouseholdInstallAttempt(catalogue_id=catalogue_id, device_id=device.id,
+                                  status=body.status, detail=body.detail[:300]))
+    db.commit()
+    return {'ok': True}
+
+
 # ------------------- Centrally managed launcher presentation v0.4.2 -------------------
 # This artwork feature is metadata only; it does not affect approval matching
 # or grant any privileges to the target EXE.
@@ -1145,7 +1319,9 @@ def known_digest(db: Session, digest: str) -> str:
     digest = digest.lower()
     if not re.fullmatch(r"[0-9a-f]{64}", digest):
         raise HTTPException(400, "Invalid SHA-256 fingerprint")
-    if not db.scalar(select(ApplicationRequest.id).where(ApplicationRequest.sha256 == digest)):
+    if not db.scalar(select(ApplicationRequest.id).where(ApplicationRequest.sha256 == digest)) and not db.scalar(
+        select(HouseholdCatalogueItem.id).where(HouseholdCatalogueItem.installer_sha256 == digest)
+    ):
         raise HTTPException(404, "Application not found")
     return digest
 
@@ -1275,10 +1451,14 @@ def admin_serve_artwork(digest: str, revision: int, db: Session = Depends(db_ses
 @app.get('/agent/applications/artwork/{digest}/{revision}')
 def agent_serve_artwork(digest: str, revision: int, device: Device = Depends(agent_auth),
                         db: Session = Depends(db_session)):
-    # Restrict artwork requests to binaries actually requested on this device.
+    # Per-device application requests remain private. Published catalogue items
+    # may be viewed by any enrolled agent so posters propagate across the family.
     known_digest(db, digest)
-    if not db.scalar(select(ApplicationRequest.id).where(
-        ApplicationRequest.device_id == device.id, ApplicationRequest.sha256 == digest)):
+    private_request = db.scalar(select(ApplicationRequest.id).where(
+        ApplicationRequest.device_id == device.id, ApplicationRequest.sha256 == digest))
+    published_catalogue = db.scalar(select(HouseholdCatalogueItem.id).where(
+        HouseholdCatalogueItem.enabled == True, HouseholdCatalogueItem.installer_sha256 == digest))
+    if not private_request and not published_catalogue:
         raise HTTPException(404, 'Artwork unavailable')
     return serve_artwork(digest, revision, db)
 

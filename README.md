@@ -256,3 +256,9 @@ See `RELEASE-v0.4.3b.md` for server-only deployment instructions and the first-s
 ### v0.4.4a (numeric release v0.4.4.1): Windows build correction
 
 Corrected the application icon call in the child-facing launcher to reference the `AgentContext` helper where it actually lives. See `RELEASE-v0.4.4a.md`.
+
+## v0.4.5 — Household software library
+
+The **Applications → Household software library** section lets an administrator publish a standalone `.exe` installer to all enrolled clients. Specify a Windows SMB/UNC share (for example `\\192.168.1.250\installers\game1\game1install.exe`) or direct HTTP(S) URL, plus an independently calculated SHA-256 checksum. The Windows Launcher verifies every downloaded/cached package against that hash before opening it as the current user. Installation attempts appear in the admin web UI. Globally managed friendly names and SteamGridDB posters use the same central metadata/caching workflow as existing application requests.
+
+See [RELEASE-v0.4.5.md](RELEASE-v0.4.5.md) for installation requirements and important boundaries: single-file `.exe` installers only, SMB permissions under the child's account, no automatic detection of completed installations, no silent elevation, and no modification to the privileged HomeWatch updater's fixed release source.

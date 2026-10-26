@@ -124,6 +124,29 @@ public sealed class AppPortalForm : Form
             await RequireSuccess(response);
             using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
             var list = document.RootElement.GetProperty("applications").Deserialize<List<PortalApplication>>() ?? new();
+            // Shared household apps are published by the parent. They are installers,
+            // deliberately distinct from installed/executable approvals.
+            using (var catalogueResponse = await http.GetAsync("agent/catalogue"))
+            {
+                if (catalogueResponse.IsSuccessStatusCode)
+                {
+                    using var catalogue = JsonDocument.Parse(await catalogueResponse.Content.ReadAsStringAsync());
+                    var items = catalogue.RootElement.GetProperty("items").Deserialize<List<PortalCatalogueItem>>() ?? new();
+                    foreach (var item in items)
+                    {
+                        list.Add(new PortalApplication
+                        {
+                            Id = -item.Id, CatalogueId = item.Id, IsCatalogue = true,
+                            FileName = Path.GetFileName(item.InstallerPath),
+                            FilePath = item.InstallerPath,
+                            Sha256 = item.InstallerSha256,
+                            DisplayName = item.Name, Description = item.Description,
+                            ArtworkRevision = item.ArtworkRevision,
+                            Publisher = "HomeWatch family library", Status = "available"
+                        });
+                    }
+                }
+            }
             // Avoid tearing down the grid, images or user's selection every heartbeat.
             var snapshot = JsonSerializer.Serialize(list);
             if (IsDisposed || (!force && previousSnapshot == snapshot)) return;
@@ -169,8 +192,8 @@ public sealed class AppPortalForm : Form
         var name = new Label { Text = app.DisplayName, Location = new Point(9, 211), Size = new Size(157, 29),
             Font = new Font("Segoe UI Semibold", 10, FontStyle.Bold), AutoEllipsis = true, ForeColor = TextColor };
         tile.Controls.Add(name);
-        var status = new Label { Text = approved ? "✓ Ready to play" : app.Status == "pending" ? "◷ Waiting for approval" : "Not available",
-            ForeColor = approved ? Green : app.Status == "pending" ? Amber : Muted,
+        var status = new Label { Text = app.IsCatalogue ? "↓ Available to install" : approved ? "✓ Ready to play" : app.Status == "pending" ? "◷ Waiting for approval" : "Not available",
+            ForeColor = approved ? Green : app.IsCatalogue ? Accent : app.Status == "pending" ? Amber : Muted,
             Location = new Point(9, 241), Size = new Size(157, 23), AutoEllipsis = true,
             Font = new Font("Segoe UI", 9) };
         tile.Controls.Add(status);
@@ -188,8 +211,11 @@ public sealed class AppPortalForm : Form
         graphics.FillRectangle(background, 0, 0, 175, 205);
         try
         {
-            using var icon = Icon.ExtractAssociatedIcon(app.FilePath);
-            if (icon != null) graphics.DrawIcon(icon, new Rectangle(55, 65, 65, 65));
+            if (!app.IsCatalogue)
+            {
+                using var icon = Icon.ExtractAssociatedIcon(app.FilePath);
+                if (icon != null) graphics.DrawIcon(icon, new Rectangle(55, 65, 65, 65));
+            }
         }
         catch { /* Missing executable / inaccessible icon: use the branded gradient. */ }
         return bitmap;
@@ -264,18 +290,22 @@ public sealed class AppPortalForm : Form
                 Dock = DockStyle.Fill, AutoEllipsis = true,
                 Font = new Font("Segoe UI Semibold", 20, FontStyle.Bold) }, 0, 1);
             var approved = app?.Status == "approved";
-            var statusText = app is null ? "Select a tile to see its details" : approved ? "✓ Approved and ready" :
+            var statusText = app is null ? "Select a tile to see its details" : app.IsCatalogue ? "↓ In the family library" : approved ? "✓ Approved and ready" :
                 app.Status == "pending" ? "◷ Waiting for parent approval" : "Not approved";
             content.Controls.Add(new Label { Text = statusText, ForeColor = approved ? Green : Amber, Dock = DockStyle.Fill,
                 Font = new Font("Segoe UI Semibold", 10, FontStyle.Bold) }, 0, 2);
             content.Controls.Add(new Label { Text = app is not null && !string.IsNullOrWhiteSpace(app.Publisher) ? $"Publisher: {app.Publisher}" : "Publisher unavailable",
                 ForeColor = Muted, AutoEllipsis = true, Dock = DockStyle.Fill }, 0, 3);
             content.Controls.Add(new Label { Text = app is null ? "A nice place to keep your favourite games!" :
+                app.IsCatalogue ? $"{app.Description}\n\nInstaller: {app.FileName}\nThis app is shared with all family devices.\nYou may need a parent to finish installation." :
                 $"File: {app.FileName}\n{app.FilePath}\n\nOnly applications approved by your parent can be opened here.",
                 ForeColor = Muted, Dock = DockStyle.Fill, AutoEllipsis = true }, 0, 4);
-            var button = ButtonFor(approved ? "▶  PLAY / OPEN" : "Unavailable", approved ? Accent : Color.FromArgb(63, 78, 100), 100, 50);
-            button.Dock = DockStyle.Fill; button.Enabled = approved;
-            if (app != null) button.Click += async (_, _) => await LaunchAsync(app, button);
+            var canUse = approved || app?.IsCatalogue == true;
+            var button = ButtonFor(app?.IsCatalogue == true ? "↓  INSTALL FROM FAMILY LIBRARY" : approved ? "▶  PLAY / OPEN" : "Unavailable",
+                canUse ? Accent : Color.FromArgb(63, 78, 100), 100, 50);
+            button.Dock = DockStyle.Fill; button.Enabled = canUse;
+            if (app != null)
+                button.Click += async (_, _) => { if (app.IsCatalogue) await InstallCatalogueAsync(app, button); else await LaunchAsync(app, button); };
             content.Controls.Add(button, 0, 5);
             detailPane.Controls.Add(content);
         }
@@ -303,6 +333,136 @@ public sealed class AppPortalForm : Form
             await ReportLaunchAsync(app.Id, "failed", e.Message);
         }
         finally { if (!IsDisposed) button.Enabled = true; }
+    }
+
+    // Installers always run as the current Windows user; the privileged service
+    // NEVER receives arbitrary paths or executes downloaded packages.
+    private async Task InstallCatalogueAsync(PortalApplication app, Button button)
+    {
+        if (app.CatalogueId <= 0 || !app.IsCatalogue) return;
+        if (MessageBox.Show(this,
+            $"Get {app.DisplayName} from your family's installer library?\n\n" +
+            "HomeWatch will verify the download before opening the installer. " +
+            "Windows may still ask for an administrator password if the setup program requires it.",
+            "Install from family library", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
+        button.Enabled = false;
+        string status = "failed", detail = "";
+        try
+        {
+            // Check the current published metadata immediately before opening the source.
+            using var response = await http.GetAsync($"agent/catalogue/{app.CatalogueId}");
+            await RequireSuccess(response);
+            var current = await response.Content.ReadFromJsonAsync<PortalCatalogueItem>();
+            if (current == null || !current.Enabled || current.InstallerSha256 != app.Sha256)
+                throw new IOException("This installer has changed. Please refresh the family library.");
+            var source = current.InstallerPath;
+            if (!System.Text.RegularExpressions.Regex.IsMatch(current.InstallerSha256, "^[a-f0-9]{64}$"))
+                throw new IOException("Invalid installer fingerprint.");
+            var httpSource = Uri.TryCreate(source, UriKind.Absolute, out var url) &&
+                (url.Scheme == Uri.UriSchemeHttps || url.Scheme == Uri.UriSchemeHttp);
+            if (!httpSource && !source.StartsWith(@"\\", StringComparison.Ordinal))
+                throw new IOException("Use an approved UNC network share or HTTP(S) installer URL.");
+            var fileName = httpSource ? Path.GetFileName(url!.AbsolutePath) : Path.GetFileName(source);
+            if (string.IsNullOrWhiteSpace(fileName) || !fileName.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
+                throw new IOException("Only .exe installers are supported.");
+            // Use the digest in the path to prevent old installers clashing with new versions.
+            var root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "HomeWatch", "installers", current.InstallerSha256);
+            Directory.CreateDirectory(root);
+            var target = Path.Combine(root, "HomeWatch-Installer.exe");
+            if (!File.Exists(target) || !await HashMatchesAsync(target, current.InstallerSha256))
+            {
+                var temp = Path.Combine(root, "download-" + Guid.NewGuid().ToString("N") + ".tmp");
+                footer.Text = $"Copying {app.DisplayName} from the family library…";
+                try
+                {
+                    const long maxLength = 8L * 1024 * 1024 * 1024;
+                    await using (var output = new FileStream(temp, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                    {
+                        if (httpSource)
+                        {
+                            // Never forward device bearer credentials to the NAS URL.
+                            using var downloader = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false })
+                            { Timeout = TimeSpan.FromMinutes(45) };
+                            using var download = await downloader.GetAsync(url, HttpCompletionOption.ResponseHeadersRead);
+                            if (!download.IsSuccessStatusCode || (int)download.StatusCode >= 300)
+                                throw new IOException("NAS HTTP download failed: " + (int)download.StatusCode);
+                            if (download.Content.Headers.ContentLength > maxLength)
+                                throw new IOException("Installer is larger than the 8 GB limit.");
+                            await using var input = await download.Content.ReadAsStreamAsync();
+                            await CopyLimitedAsync(input, output, maxLength);
+                        }
+                        else
+                        {
+                            await using var input = new FileStream(source, FileMode.Open, FileAccess.Read, FileShare.Read);
+                            if (input.Length > maxLength) throw new IOException("Installer is larger than the 8 GB limit.");
+                            await CopyLimitedAsync(input, output, maxLength);
+                        }
+                    }
+                    if (!await HashMatchesAsync(temp, current.InstallerSha256))
+                    {
+                        status = "hash_mismatch";
+                        throw new IOException("Installer fingerprint mismatch. Nothing was launched. Ask your parent to verify the NAS file and its SHA-256.");
+                    }
+                    File.Move(temp, target, true);
+                }
+                finally { try { if (File.Exists(temp)) File.Delete(temp); } catch { } }
+            }
+            // Recheck the exact local bytes and the parent's publication status
+            // right before launching (the catalogue may have been revoked).
+            if (!await HashMatchesAsync(target, current.InstallerSha256))
+                throw new IOException("Installer changed after verification. Launch blocked.");
+            using (var publishCheck = await http.GetAsync($"agent/catalogue/{app.CatalogueId}"))
+            {
+                await RequireSuccess(publishCheck);
+                var latest = await publishCheck.Content.ReadFromJsonAsync<PortalCatalogueItem>();
+                if (latest == null || !latest.Enabled || latest.InstallerSha256 != current.InstallerSha256)
+                    throw new IOException("This installer is no longer published by your parent.");
+            }
+            footer.Text = $"Opening the installer for {app.DisplayName}…";
+            using var process = Process.Start(new ProcessStartInfo(target)
+            { UseShellExecute = true, WorkingDirectory = root });
+            if (process is null) throw new IOException("Windows could not open the installer.");
+            status = "started";
+            detail = "Installer opened as the current Windows user";
+            footer.Text = "Installer started! Follow its instructions. ✨";
+        }
+        catch (Exception ex)
+        {
+            detail = ex.Message;
+            if (!IsDisposed) footer.Text = "Could not install: " + ex.Message;
+        }
+        finally
+        {
+            try
+            {
+                using var audit = await http.PostAsJsonAsync($"agent/catalogue/{app.CatalogueId}/attempts",
+                    new { status, detail });
+                await RequireSuccess(audit);
+            }
+            catch { /* Audit transport failure must not stop the UI. */ }
+            if (!IsDisposed) button.Enabled = true;
+        }
+    }
+
+    private static async Task CopyLimitedAsync(Stream input, Stream output, long maxLength)
+    {
+        var buffer = new byte[128 * 1024];
+        long copied = 0;
+        int size;
+        while ((size = await input.ReadAsync(buffer)) > 0)
+        {
+            copied += size;
+            if (copied > maxLength) throw new IOException("Installer is larger than the 8 GB limit.");
+            await output.WriteAsync(buffer.AsMemory(0, size));
+        }
+    }
+
+    private static async Task<bool> HashMatchesAsync(string filename, string expected)
+    {
+        await using var input = new FileStream(filename, FileMode.Open, FileAccess.Read, FileShare.Read);
+        var digest = Convert.ToHexString(await SHA256.HashDataAsync(input)).ToLowerInvariant();
+        return string.Equals(digest, expected, StringComparison.Ordinal);
     }
 
     private async Task ReportLaunchAsync(int id, string status, string detail)
@@ -483,9 +643,23 @@ if ($null -ne $c) {
     }
 }
 
+public sealed class PortalCatalogueItem
+{
+    [JsonPropertyName("id")] public int Id { get; set; }
+    [JsonPropertyName("name")] public string Name { get; set; } = "";
+    [JsonPropertyName("installer_path")] public string InstallerPath { get; set; } = "";
+    [JsonPropertyName("installer_sha256")] public string InstallerSha256 { get; set; } = "";
+    [JsonPropertyName("description")] public string Description { get; set; } = "";
+    [JsonPropertyName("enabled")] public bool Enabled { get; set; }
+    [JsonPropertyName("artwork_revision")] public int ArtworkRevision { get; set; }
+}
+
 public sealed class PortalApplication
 {
     [JsonPropertyName("id")] public int Id { get; set; }
+    public int CatalogueId { get; set; }
+    public bool IsCatalogue { get; set; }
+    public string Description { get; set; } = "";
     [JsonPropertyName("file_name")] public string FileName { get; set; } = "";
     [JsonPropertyName("file_path")] public string FilePath { get; set; } = "";
     [JsonPropertyName("status")] public string Status { get; set; } = "";
