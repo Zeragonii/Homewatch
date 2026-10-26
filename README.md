@@ -246,3 +246,8 @@ The child-facing **My Apps** portal can be opened by double-clicking the HomeWat
 ### Native x64 installation patch (v0.4.3a)
 
 See `RELEASE-v0.4.3a.md` for the one-time migration procedure. Publish using numeric Git tag `v0.4.3.1` because the updater parses `System.Version`.
+
+
+### v0.4.3b artwork hotfix
+
+See `RELEASE-v0.4.3b.md` for server-only deployment instructions and the first-save artwork regression fix.

@@ -282,3 +282,39 @@ def test_presentation_auth_and_input_rejections():
         assert False, 'SSRF URL was accepted'
     except Exception as e:
         assert '400' in str(e.status_code) if hasattr(e,'status_code') else False
+
+
+def test_artwork_can_be_selected_before_friendly_name(monkeypatch):
+    """Regression: a brand-new presentation has revision=None until flushed."""
+    import io
+    import uuid
+    from PIL import Image
+    from server.app import main as hw
+
+    device, auth = _make_app_device()
+    digest = uuid.uuid4().hex * 2
+    candidate = _app_candidate('a')
+    candidate['sha256'] = digest
+    requested = client.post('/agent/applications/requests', headers=auth, json=candidate)
+    assert requested.status_code == 200, requested.text
+
+    def fake_grid(path):
+        return {'data': [{'id': 902, 'url': 'https://images.steamgriddb.com/example.jpg'}]}
+
+    monkeypatch.setattr(hw, 'steamgrid_json', fake_grid)
+    img = Image.new('RGB', (600, 900), 'navy')
+    out = io.BytesIO(); img.save(out, 'JPEG')
+    monkeypatch.setattr(hw, 'download_artwork', lambda _: out.getvalue())
+
+    endpoint = f'/api/applications/{digest}/artwork'
+    choice = {'game_id': 123, 'artwork_id': 902}
+    first = client.post(endpoint, json=choice)
+    assert first.status_code == 200, first.text
+    assert first.json()['artwork_revision'] == 1
+    assert first.json()['display_name'] == 'Play'
+
+    second = client.post(endpoint, json=choice)
+    assert second.status_code == 200, second.text
+    assert second.json()['artwork_revision'] == 2
+    assert client.get(f'/agent/applications/artwork/{digest}/2', headers=auth).status_code == 200
+    assert client.get(f'/agent/applications/artwork/{digest}/1', headers=auth).status_code == 404

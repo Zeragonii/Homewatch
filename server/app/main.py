@@ -214,7 +214,7 @@ class ApplicationPresentation(Base):
     __tablename__ = "application_presentations"
     sha256: Mapped[str] = mapped_column(String(64), primary_key=True)
     display_name: Mapped[str] = mapped_column(String(120), default="")
-    artwork_revision: Mapped[int] = mapped_column(Integer, default=0)
+    artwork_revision: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"), nullable=False)
     artwork_file: Mapped[str] = mapped_column(String(130), default="")
     artwork_credit: Mapped[str] = mapped_column(String(255), default="")
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
@@ -240,6 +240,10 @@ with engine.begin() as conn:
         conn.execute(text("ALTER TABLE devices ADD COLUMN logged_in_user VARCHAR(255) NOT NULL DEFAULT ''"))
     if "update_status" not in device_columns:
         conn.execute(text("ALTER TABLE devices ADD COLUMN update_status VARCHAR(600) NOT NULL DEFAULT ''"))
+    # Older artwork rows can contain NULL even though current models expect an integer.
+    # Keep existing names/artwork intact; normalize only the cache revision.
+    if inspect(conn).has_table("application_presentations"):
+        conn.execute(text("UPDATE application_presentations SET artwork_revision = 0 WHERE artwork_revision IS NULL"))
 
 app = FastAPI(title=APP_TITLE)
 static_dir = Path(__file__).parent / "static"
@@ -1003,7 +1007,7 @@ def matching_approval(db: Session, device: Device, info: dict) -> Optional[Appli
 def presentation_json(db: Session, digest: str, fallback: str) -> dict:
     row = db.get(ApplicationPresentation, digest)
     name = row.display_name if row and row.display_name else Path(fallback).stem
-    revision = row.artwork_revision if row and row.artwork_file else 0
+    revision = (row.artwork_revision or 0) if row and row.artwork_file else 0
     return {"display_name": name, "artwork_revision": revision,
             "artwork_url": f"/api/applications/artwork/{digest}/{revision}" if revision else "",
             "artwork_credit": row.artwork_credit if row else ""}
@@ -1244,7 +1248,9 @@ def set_app_artwork(digest: str, body: ArtworkChoice, db: Session = Depends(db_s
     if not item:
         item = ApplicationPresentation(sha256=digest)
         db.add(item)
-    revision = item.artwork_revision + 1
+    # ORM defaults only materialize at INSERT/flush; newly constructed rows
+    # still have artwork_revision=None at this point.
+    revision = (item.artwork_revision or 0) + 1
     filename = f"{digest}-{revision}.jpg"
     temp_path = ARTWORK_DIR / (filename + ".tmp")
     temp_path.write_bytes(binary)
@@ -1257,7 +1263,8 @@ def set_app_artwork(digest: str, body: ArtworkChoice, db: Session = Depends(db_s
     db.commit()
     if previous_file and previous_file != filename:
         (ARTWORK_DIR / previous_file).unlink(missing_ok=True)
-    return presentation_json(db, digest, '')
+    fallback = db.scalar(select(ApplicationRequest.file_name).where(ApplicationRequest.sha256 == digest)) or ''
+    return presentation_json(db, digest, fallback)
 
 
 @app.get('/api/applications/artwork/{digest}/{revision}', dependencies=[Depends(require_admin)])
