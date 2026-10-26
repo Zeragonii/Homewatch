@@ -4,3 +4,4 @@ SQLAlchemy==2.0.43
 psycopg[binary]==3.2.9
 itsdangerous==2.2.0
 python-multipart==0.0.20
+Pillow==11.3.0

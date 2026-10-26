@@ -20,7 +20,9 @@ services:
       - "8090:8000"
     volumes:
       - homewatch_screenshots:/data/screenshots
+      - homewatch_artwork:/data/artwork
 
 volumes:
   homewatch_db:
   homewatch_screenshots:
+  homewatch_artwork:

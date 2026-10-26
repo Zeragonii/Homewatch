@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Drawing;
+using System.Drawing.Drawing2D;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Security.Cryptography;
@@ -8,165 +9,112 @@ using System.Text.Json.Serialization;
 
 namespace HomeWatchAgent;
 
-// Runs in the same interactive, unprivileged process as the tray agent.
-// It never requests execution from the SYSTEM updater service.
+// Runs in the logged-in user's session. No privileged operations are exposed here.
 public sealed class AppPortalForm : Form
 {
-    private static readonly Color BackgroundColor = Color.FromArgb(13, 23, 41);
-    private static readonly Color SurfaceColor = Color.FromArgb(27, 41, 66);
-    private static readonly Color ForegroundColor = Color.FromArgb(237, 244, 255);
-    private static readonly Color MutedColor = Color.FromArgb(163, 185, 212);
-    private static readonly Color MintColor = Color.FromArgb(97, 213, 164);
-    private static readonly Color BlueColor = Color.FromArgb(84, 137, 245);
-    private static readonly Color GoldColor = Color.FromArgb(249, 190, 93);
+    private static readonly Color Background = Color.FromArgb(12, 20, 35);
+    private static readonly Color Surface = Color.FromArgb(24, 36, 57);
+    private static readonly Color TextColor = Color.FromArgb(240, 246, 255);
+    private static readonly Color Muted = Color.FromArgb(162, 180, 204);
+    private static readonly Color Accent = Color.FromArgb(92, 157, 249);
+    private static readonly Color Green = Color.FromArgb(104, 218, 165);
+    private static readonly Color Amber = Color.FromArgb(255, 201, 112);
 
     private readonly HttpClient http;
-    private readonly string deviceId;
-    private readonly string token;
-    private readonly FlowLayoutPanel appList;
-    private readonly Label feedback;
-    private readonly Label chosenFile;
-    private readonly TextBox reason;
-    private readonly Button requestButton;
-    private readonly System.Windows.Forms.Timer refreshTimer;
-    private ApplicationCandidate? selected;
+    private readonly FlowLayoutPanel posterGrid;
+    private readonly Panel detailPane;
+    private readonly Label footer;
+    private readonly System.Windows.Forms.Timer timer;
+    private readonly string cacheDirectory = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "HomeWatch", "artwork");
+    private List<PortalApplication> apps = new();
+    private string previousSnapshot = "";
+    private int? selectedId;
     private bool loading;
-    private bool scanning;
 
     public AppPortalForm(string serverUrl, string deviceId, string token)
     {
-        this.deviceId = deviceId;
-        this.token = token;
-        http = new HttpClient { BaseAddress = new Uri(serverUrl.TrimEnd('/') + "/"), Timeout = TimeSpan.FromSeconds(60) };
-        http.DefaultRequestHeaders.Add("X-Device-ID", this.deviceId);
-        http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", this.token);
+        http = new HttpClient { BaseAddress = new Uri(serverUrl.TrimEnd('/') + "/"), Timeout = TimeSpan.FromSeconds(50) };
+        http.DefaultRequestHeaders.Add("X-Device-ID", deviceId);
+        http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        Directory.CreateDirectory(cacheDirectory);
 
-        Text = "HomeWatch • My apps";
+        Text = "HomeWatch | My Games";
         StartPosition = FormStartPosition.CenterScreen;
-        MinimumSize = new Size(650, 600);
-        Size = new Size(750, 730);
-        BackColor = BackgroundColor;
-        ForeColor = ForegroundColor;
+        MinimumSize = new Size(900, 650);
+        Size = new Size(1120, 750);
+        BackColor = Background;
+        ForeColor = TextColor;
         Font = new Font("Segoe UI", 10);
         Icon = SystemIcons.Shield;
 
-        var shell = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3, Padding = new Padding(22), BackColor = BackgroundColor };
-        shell.RowStyles.Add(new RowStyle(SizeType.Absolute, 112));
-        shell.RowStyles.Add(new RowStyle(SizeType.Absolute, 184));
-        shell.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        var root = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(25, 18, 25, 16), ColumnCount = 1, RowCount = 3, BackColor = Background };
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 108));
+        root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 43));
 
-        var header = new Panel { Dock = DockStyle.Fill };
-        header.Controls.Add(new Label { Text = "MY APP SPACE", ForeColor = MintColor, Font = new Font("Segoe UI Semibold", 9, FontStyle.Bold), Location = new Point(2, 2), AutoSize = true });
-        header.Controls.Add(new Label { Text = "Hey there! 👋", ForeColor = ForegroundColor, Font = new Font("Segoe UI Semibold", 22, FontStyle.Bold), Location = new Point(0, 26), AutoSize = true });
-        header.Controls.Add(new Label { Text = "Ask to play something new, or open your approved apps.", ForeColor = MutedColor, Location = new Point(2, 73), AutoSize = true });
-        shell.Controls.Add(header, 0, 0);
+        var header = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1 };
+        header.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        header.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 230));
+        var heading = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 3, ColumnCount = 1 };
+        heading.RowStyles.Add(new RowStyle(SizeType.Absolute, 22));
+        heading.RowStyles.Add(new RowStyle(SizeType.Absolute, 47));
+        heading.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        heading.Controls.Add(new Label { Text = "HOMEWATCH  /  MY SPACE", ForeColor = Green, Dock = DockStyle.Fill, Font = new Font("Segoe UI Semibold", 9, FontStyle.Bold) }, 0, 0);
+        heading.Controls.Add(new Label { Text = "My games & apps", ForeColor = TextColor, Dock = DockStyle.Fill, Font = new Font("Segoe UI Semibold", 25, FontStyle.Bold) }, 0, 1);
+        heading.Controls.Add(new Label { Text = "Pick something you love. We'll keep your collection ready.", ForeColor = Muted, Dock = DockStyle.Fill, AutoEllipsis = true }, 0, 2);
+        header.Controls.Add(heading, 0, 0);
+        var headerActions = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown, WrapContents = false, Padding = new Padding(0, 1, 0, 0) };
+        var request = ButtonFor("+ Request a new app", Accent, 215, 42);
+        request.Click += async (_, _) => await NewRequestAsync();
+        var refresh = ButtonFor("Refresh library", Surface, 215, 35);
+        refresh.Click += async (_, _) => await LoadAppsAsync(force: true);
+        headerActions.Controls.Add(request);
+        headerActions.Controls.Add(refresh);
+        header.Controls.Add(headerActions, 1, 0);
+        root.Controls.Add(header, 0, 0);
 
-        var requestPanel = new TableLayoutPanel { Dock = DockStyle.Fill, BackColor = SurfaceColor, Padding = new Padding(17, 14, 17, 13), RowCount = 4, ColumnCount = 2 };
-        requestPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        requestPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 150));
-        requestPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 26));
-        requestPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 39));
-        requestPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 45));
-        requestPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        requestPanel.Controls.Add(new Label { Text = "REQUEST A NEW APP", ForeColor = ForegroundColor, Dock = DockStyle.Fill, Font = new Font("Segoe UI Semibold", 10, FontStyle.Bold) }, 0, 0);
-        chosenFile = new Label { Text = "No app selected yet", ForeColor = MutedColor, AutoEllipsis = true, Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft };
-        requestPanel.Controls.Add(chosenFile, 0, 1);
-        var chooseButton = MakeButton("Choose app…", BlueColor);
-        chooseButton.Click += async (_, _) => await ChooseAsync();
-        requestPanel.Controls.Add(chooseButton, 1, 1);
-        reason = new TextBox { Dock = DockStyle.Fill, PlaceholderText = "Why would you like this app? (optional)", BackColor = BackgroundColor, ForeColor = ForegroundColor, BorderStyle = BorderStyle.FixedSingle, MaxLength = 400, Margin = new Padding(0, 6, 8, 6) };
-        requestPanel.Controls.Add(reason, 0, 2);
-        requestButton = MakeButton("Ask parent", MintColor);
-        requestButton.ForeColor = BackgroundColor;
-        requestButton.Enabled = false;
-        requestButton.Click += async (_, _) => await RequestAsync();
-        requestPanel.Controls.Add(requestButton, 1, 2);
-        feedback = new Label { Text = "Pick the .exe file for the app you want.", ForeColor = MutedColor, Dock = DockStyle.Fill, AutoEllipsis = true, TextAlign = ContentAlignment.MiddleLeft };
-        requestPanel.Controls.Add(feedback, 0, 3);
-        requestPanel.SetColumnSpan(feedback, 2);
-        shell.Controls.Add(requestPanel, 0, 1);
+        var body = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1 };
+        body.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 68));
+        body.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 32));
+        posterGrid = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoScroll = true, WrapContents = true,
+            FlowDirection = FlowDirection.LeftToRight, BackColor = Background, Padding = new Padding(0, 5, 10, 5) };
+        detailPane = new Panel { Dock = DockStyle.Fill, BackColor = Surface, Padding = new Padding(16), Margin = new Padding(12, 3, 0, 3) };
+        body.Controls.Add(posterGrid, 0, 0);
+        body.Controls.Add(detailPane, 1, 0);
+        root.Controls.Add(body, 0, 1);
+        footer = new Label { Text = "Your library will show up here. ✨", Dock = DockStyle.Fill,
+            TextAlign = ContentAlignment.MiddleLeft, ForeColor = Muted, AutoEllipsis = true };
+        root.Controls.Add(footer, 0, 2);
+        Controls.Add(root);
+        ShowDetails(null);
 
-        var listPanel = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2, Padding = new Padding(0, 16, 0, 0) };
-        listPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 43));
-        listPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        var listHeading = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2 };
-        listHeading.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        listHeading.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 108));
-        listHeading.Controls.Add(new Label { Text = "Your applications", Font = new Font("Segoe UI Semibold", 15, FontStyle.Bold), ForeColor = ForegroundColor, Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft }, 0, 0);
-        var refreshButton = MakeButton("Refresh", SurfaceColor);
-        refreshButton.Click += async (_, _) => await LoadAppsAsync();
-        listHeading.Controls.Add(refreshButton, 1, 0);
-        listPanel.Controls.Add(listHeading, 0, 0);
-        appList = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoScroll = true, WrapContents = false, FlowDirection = FlowDirection.TopDown, Padding = new Padding(0, 5, 0, 0) };
-        appList.SizeChanged += (_, _) => ResizeCards();
-        listPanel.Controls.Add(appList, 0, 1);
-        shell.Controls.Add(listPanel, 0, 2);
-        Controls.Add(shell);
-
-        refreshTimer = new System.Windows.Forms.Timer { Interval = 12000 };
-        refreshTimer.Tick += async (_, _) => await LoadAppsAsync();
-        Shown += async (_, _) => { refreshTimer.Start(); await LoadAppsAsync(); };
-        FormClosed += (_, _) => { refreshTimer.Stop(); refreshTimer.Dispose(); http.Dispose(); };
+        timer = new System.Windows.Forms.Timer { Interval = 12000 };
+        timer.Tick += async (_, _) => await LoadAppsAsync();
+        Shown += async (_, _) => { timer.Start(); await LoadAppsAsync(); };
+        FormClosed += (_, _) => { timer.Stop(); timer.Dispose(); http.Dispose(); DisposePosterImages(); };
     }
 
-    private static Button MakeButton(string text, Color background) => new()
+    private static Button ButtonFor(string title, Color color, int width, int height)
     {
-        Text = text, BackColor = background, ForeColor = Color.White,
-        FlatStyle = FlatStyle.Flat, Dock = DockStyle.Fill, Cursor = Cursors.Hand,
-        Font = new Font("Segoe UI Semibold", 9.5F, FontStyle.Bold), Margin = new Padding(6, 2, 0, 2)
-    };
-
-    private void ResizeCards()
-    {
-        foreach (Control c in appList.Controls) c.Width = Math.Max(250, appList.ClientSize.Width - 26);
+        var b = new Button { Text = title, Size = new Size(width, height), BackColor = color,
+            ForeColor = Color.White, FlatStyle = FlatStyle.Flat, Cursor = Cursors.Hand,
+            Font = new Font("Segoe UI Semibold", 10, FontStyle.Bold), Margin = new Padding(0, 1, 0, 6) };
+        b.FlatAppearance.BorderSize = 0;
+        return b;
     }
 
-    private async Task ChooseAsync()
+    private async Task NewRequestAsync()
     {
-        using var fileDialog = new OpenFileDialog { Title = "Choose an application", Filter = "Windows apps (*.exe)|*.exe", CheckFileExists = true, Multiselect = false };
-        if (fileDialog.ShowDialog(this) != DialogResult.OK) return;
-        scanning = true;
-        requestButton.Enabled = false;
-        feedback.Text = "Checking the app's fingerprint and publisher…";
-        try
+        using var dialog = new NewAppRequestForm(http);
+        if (dialog.ShowDialog(this) == DialogResult.OK)
         {
-            selected = await ApplicationCandidate.ScanAsync(fileDialog.FileName);
-            chosenFile.Text = $"{selected.FileName}  •  {selected.SignatureStatus} signature";
-            feedback.Text = selected.SignatureStatus == "valid"
-                ? $"Signed by {selected.Publisher}. Ready to request."
-                : "Publisher signature could not be verified; your parent can review the request.";
+            footer.Text = "Request sent to your parent! ✨";
+            await LoadAppsAsync(force: true);
         }
-        catch (Exception ex)
-        {
-            selected = null;
-            chosenFile.Text = "Please choose another application";
-            feedback.Text = "Couldn't inspect that file: " + ex.Message;
-        }
-        finally { scanning = false; requestButton.Enabled = selected is not null; }
     }
 
-    private async Task RequestAsync()
-    {
-        if (selected is null || scanning) return;
-        requestButton.Enabled = false;
-        feedback.Text = "Sending your request…";
-        try
-        {
-            // Rescan immediately before sending to avoid a stale fingerprint.
-            var candidate = await ApplicationCandidate.ScanAsync(selected.FilePath);
-            candidate.Reason = reason.Text.Trim();
-            using var response = await http.PostAsJsonAsync("agent/applications/requests", candidate);
-            await RequireSuccess(response);
-            var app = await response.Content.ReadFromJsonAsync<PortalApplication>();
-            feedback.Text = app?.Status == "approved" ? "Good news! This app is already approved. 🎉" : "Request sent! Your parent can review it now. ✨";
-            selected = null; reason.Clear(); chosenFile.Text = "No app selected yet";
-            await LoadAppsAsync();
-        }
-        catch (Exception ex) { feedback.Text = "Couldn't send request: " + ex.Message; }
-        finally { requestButton.Enabled = selected is not null; }
-    }
-
-    private async Task LoadAppsAsync()
+    private async Task LoadAppsAsync(bool force = false)
     {
         if (loading || IsDisposed) return;
         loading = true;
@@ -174,56 +122,164 @@ public sealed class AppPortalForm : Form
         {
             using var response = await http.GetAsync("agent/applications");
             await RequireSuccess(response);
-            using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
-            var apps = doc.RootElement.GetProperty("applications").Deserialize<List<PortalApplication>>() ?? new();
-            if (IsDisposed) return;
-            appList.SuspendLayout();
+            using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+            var list = document.RootElement.GetProperty("applications").Deserialize<List<PortalApplication>>() ?? new();
+            // Avoid tearing down the grid, images or user's selection every heartbeat.
+            var snapshot = JsonSerializer.Serialize(list);
+            if (IsDisposed || (!force && previousSnapshot == snapshot)) return;
+            previousSnapshot = snapshot;
+            apps = list.GroupBy(a => a.FilePath, StringComparer.OrdinalIgnoreCase).Select(g => g.First()).ToList();
+            DisposePosterImages();
+            posterGrid.SuspendLayout();
             try
             {
-                appList.Controls.Clear();
-                if (apps.Count == 0)
+                while (posterGrid.Controls.Count > 0)
                 {
-                    appList.Controls.Add(new Label { Text = "Nothing here yet. Choose an app above and ask your parent!", ForeColor = MutedColor, AutoSize = true, Padding = new Padding(10, 18, 0, 0) });
+                    var oldControl = posterGrid.Controls[0];
+                    posterGrid.Controls.RemoveAt(0);
+                    oldControl.Dispose();
                 }
-                foreach (var app in apps) appList.Controls.Add(CreateCard(app));
-                ResizeCards();
+                if (apps.Count == 0)
+                    posterGrid.Controls.Add(new Label { ForeColor = Muted, AutoSize = true,
+                        Text = "No games here yet. Tap '+ Request a new app' to get started!", Padding = new Padding(10, 20, 5, 5) });
+                foreach (var app in apps) posterGrid.Controls.Add(CreateTile(app));
             }
-            finally { appList.ResumeLayout(); }
+            finally { posterGrid.ResumeLayout(); }
+            var selected = apps.FirstOrDefault(a => a.Id == selectedId);
+            ShowDetails(selected);
+            // Painting happens first; artwork downloads and caches asynchronously afterward.
+            foreach (var app in apps)
+                if (app.ArtworkRevision > 0)
+                    _ = PopulatePosterAsync(app);
         }
-        catch (Exception ex) { if (!IsDisposed) feedback.Text = "Couldn't refresh apps: " + ex.Message; }
+        catch (Exception e) { if (!IsDisposed) footer.Text = "Unable to refresh your apps: " + e.Message; }
         finally { loading = false; }
     }
 
-    private Panel CreateCard(PortalApplication app)
+    private Control CreateTile(PortalApplication app)
     {
-        var approved = app.Status == "approved";
-        var card = new Panel { Height = 88, BackColor = SurfaceColor, Margin = new Padding(0, 0, 0, 9) };
-        var layout = new TableLayoutPanel
+        bool approved = app.Status == "approved";
+        var tile = new Panel { Size = new Size(175, 272), BackColor = Surface,
+            Margin = new Padding(0, 0, 14, 14), Cursor = Cursors.Hand, Tag = app.Id };
+        var poster = new PictureBox { Name = "poster", Size = new Size(175, 205), Location = Point.Empty,
+            BackColor = Color.FromArgb(42, 63, 95), SizeMode = PictureBoxSizeMode.Zoom,
+            Tag = app.Sha256 + "-" + app.ArtworkRevision };
+        poster.Image = MakePlaceholderArt(app);
+        tile.Controls.Add(poster);
+        var name = new Label { Text = app.DisplayName, Location = new Point(9, 211), Size = new Size(157, 29),
+            Font = new Font("Segoe UI Semibold", 10, FontStyle.Bold), AutoEllipsis = true, ForeColor = TextColor };
+        tile.Controls.Add(name);
+        var status = new Label { Text = approved ? "✓ Ready to play" : app.Status == "pending" ? "◷ Waiting for approval" : "Not available",
+            ForeColor = approved ? Green : app.Status == "pending" ? Amber : Muted,
+            Location = new Point(9, 241), Size = new Size(157, 23), AutoEllipsis = true,
+            Font = new Font("Segoe UI", 9) };
+        tile.Controls.Add(status);
+        foreach (Control clickable in new Control[] { tile, poster, name, status })
+            clickable.Click += (_, _) => { selectedId = app.Id; ShowDetails(app); };
+        return tile;
+    }
+
+    private static Bitmap MakePlaceholderArt(PortalApplication app)
+    {
+        var bitmap = new Bitmap(175, 205);
+        using var graphics = Graphics.FromImage(bitmap);
+        using var background = new LinearGradientBrush(new Rectangle(0, 0, 175, 205),
+            Color.FromArgb(55, 82, 129), Color.FromArgb(23, 40, 66), LinearGradientMode.Vertical);
+        graphics.FillRectangle(background, 0, 0, 175, 205);
+        try
         {
-            Dock = DockStyle.Fill, BackColor = SurfaceColor,
-            Padding = new Padding(14, 10, 14, 10), ColumnCount = 2, RowCount = 2
-        };
-        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 143));
-        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 53));
-        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 47));
-        var name = new Label { Text = app.FileName, Font = new Font("Segoe UI Semibold", 11, FontStyle.Bold), ForeColor = ForegroundColor, AutoEllipsis = true, Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft, Margin = Padding.Empty };
-        var statusLabel = approved ? "✓ Approved" : app.Status switch { "pending" => "⏳ Waiting for approval", "denied" => "Not approved", _ => "Approval removed" };
-        var statusColor = approved ? MintColor : app.Status == "pending" ? GoldColor : MutedColor;
-        var status = new Label { Text = statusLabel + (approved && app.ApprovalScope != "" ? $"  •  {app.ApprovalScope}" : ""), ForeColor = statusColor, AutoEllipsis = true, Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft, Margin = Padding.Empty };
-        var launch = MakeButton(approved ? "Play / Open" : app.Status switch
+            using var icon = Icon.ExtractAssociatedIcon(app.FilePath);
+            if (icon != null) graphics.DrawIcon(icon, new Rectangle(55, 65, 65, 65));
+        }
+        catch { /* Missing executable / inaccessible icon: use the branded gradient. */ }
+        return bitmap;
+    }
+
+    private async Task PopulatePosterAsync(PortalApplication app)
+    {
+        try
         {
-            "pending" => "Waiting…", "denied" => "Not approved", _ => "Unavailable"
-        }, approved ? BlueColor : Color.FromArgb(60, 77, 100));
-        launch.Enabled = approved;
-        launch.Margin = new Padding(8, 5, 0, 5);
-        launch.Click += async (_, _) => await LaunchAsync(app, launch);
-        layout.Controls.Add(name, 0, 0);
-        layout.Controls.Add(status, 0, 1);
-        layout.Controls.Add(launch, 1, 0);
-        layout.SetRowSpan(launch, 2);
-        card.Controls.Add(layout);
-        return card;
+            var image = await LoadPosterAsync(app);
+            if (IsDisposed) { image?.Dispose(); return; }
+            var tile = posterGrid.Controls.OfType<Panel>().FirstOrDefault(x => x.Tag is int id && id == app.Id);
+            var poster = tile?.Controls.OfType<PictureBox>().FirstOrDefault(x => x.Name == "poster");
+            if (poster == null || poster.IsDisposed || image == null ||
+                !string.Equals(poster.Tag?.ToString(), app.Sha256 + "-" + app.ArtworkRevision,
+                               StringComparison.Ordinal)) { image?.Dispose(); return; }
+            var old = poster.Image; poster.Image = image; old?.Dispose();
+        }
+        catch { /* Missing artwork should never prevent requesting or opening an app. */ }
+    }
+
+    private async Task<Image?> LoadPosterAsync(PortalApplication app)
+    {
+        if (app.ArtworkRevision < 1 || !System.Text.RegularExpressions.Regex.IsMatch(app.Sha256, "^[0-9a-f]{64}$")) return null;
+        var file = Path.Combine(cacheDirectory, app.Sha256 + "-" + app.ArtworkRevision + ".jpg");
+        if (!File.Exists(file))
+        {
+            using var response = await http.GetAsync($"agent/applications/artwork/{app.Sha256}/{app.ArtworkRevision}");
+            await RequireSuccess(response);
+            var data = await response.Content.ReadAsByteArrayAsync();
+            if (data.Length > 3_000_000 || data.Length < 100) throw new IOException("Unexpected artwork size");
+            var temp = file + ".tmp";
+            await File.WriteAllBytesAsync(temp, data);
+            File.Move(temp, file, true);
+        }
+        // Clone the image so the file is never locked while the launcher runs.
+        var bytes = await File.ReadAllBytesAsync(file);
+        using var stream = new MemoryStream(bytes);
+        using var img = Image.FromStream(stream);
+        return new Bitmap(img);
+    }
+
+    private void DisposePosterImages()
+    {
+        foreach (var tile in posterGrid.Controls.OfType<Panel>())
+            foreach (var image in tile.Controls.OfType<PictureBox>())
+            { image.Image?.Dispose(); image.Image = null; }
+    }
+
+    private void ShowDetails(PortalApplication? app)
+    {
+        detailPane.SuspendLayout();
+        try
+        {
+            while (detailPane.Controls.Count > 0)
+            {
+                var oldControl = detailPane.Controls[0];
+                detailPane.Controls.RemoveAt(0);
+                oldControl.Dispose();
+            }
+            var content = new TableLayoutPanel { Dock = DockStyle.Fill, BackColor = Surface,
+                RowCount = 6, ColumnCount = 1, Padding = new Padding(12, 14, 12, 14) };
+            content.RowStyles.Add(new RowStyle(SizeType.Absolute, 35));
+            content.RowStyles.Add(new RowStyle(SizeType.Absolute, 110));
+            content.RowStyles.Add(new RowStyle(SizeType.Absolute, 48));
+            content.RowStyles.Add(new RowStyle(SizeType.Absolute, 72));
+            content.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            content.RowStyles.Add(new RowStyle(SizeType.Absolute, 61));
+            content.Controls.Add(new Label { Text = "ABOUT THIS APP", ForeColor = Accent, Dock = DockStyle.Fill,
+                Font = new Font("Segoe UI Semibold", 9, FontStyle.Bold) }, 0, 0);
+            content.Controls.Add(new Label { Text = app?.DisplayName ?? "Choose a game", ForeColor = TextColor,
+                Dock = DockStyle.Fill, AutoEllipsis = true,
+                Font = new Font("Segoe UI Semibold", 20, FontStyle.Bold) }, 0, 1);
+            var approved = app?.Status == "approved";
+            var statusText = app is null ? "Select a tile to see its details" : approved ? "✓ Approved and ready" :
+                app.Status == "pending" ? "◷ Waiting for parent approval" : "Not approved";
+            content.Controls.Add(new Label { Text = statusText, ForeColor = approved ? Green : Amber, Dock = DockStyle.Fill,
+                Font = new Font("Segoe UI Semibold", 10, FontStyle.Bold) }, 0, 2);
+            content.Controls.Add(new Label { Text = app is not null && !string.IsNullOrWhiteSpace(app.Publisher) ? $"Publisher: {app.Publisher}" : "Publisher unavailable",
+                ForeColor = Muted, AutoEllipsis = true, Dock = DockStyle.Fill }, 0, 3);
+            content.Controls.Add(new Label { Text = app is null ? "A nice place to keep your favourite games!" :
+                $"File: {app.FileName}\n{app.FilePath}\n\nOnly applications approved by your parent can be opened here.",
+                ForeColor = Muted, Dock = DockStyle.Fill, AutoEllipsis = true }, 0, 4);
+            var button = ButtonFor(approved ? "▶  PLAY / OPEN" : "Unavailable", approved ? Accent : Color.FromArgb(63, 78, 100), 100, 50);
+            button.Dock = DockStyle.Fill; button.Enabled = approved;
+            if (app != null) button.Click += async (_, _) => await LaunchAsync(app, button);
+            content.Controls.Add(button, 0, 5);
+            detailPane.Controls.Add(content);
+        }
+        finally { detailPane.ResumeLayout(); }
     }
 
     private async Task LaunchAsync(PortalApplication app, Button button)
@@ -234,18 +290,17 @@ public sealed class AppPortalForm : Form
             var candidate = await ApplicationCandidate.ScanAsync(app.FilePath);
             using var check = await http.PostAsJsonAsync($"agent/applications/{app.Id}/verify", candidate);
             await RequireSuccess(check);
-            // Normal logged-in user launch. No UAC bypass or SYSTEM privileges.
             using var process = Process.Start(new ProcessStartInfo(app.FilePath)
             {
                 UseShellExecute = true, WorkingDirectory = Path.GetDirectoryName(app.FilePath) ?? ""
             });
-            feedback.Text = "Enjoy! 🎮";
+            footer.Text = "Have fun! 🎮";
             await ReportLaunchAsync(app.Id, "started", "Started as the current Windows user");
         }
-        catch (Exception ex)
+        catch (Exception e)
         {
-            feedback.Text = "Can't open that app: " + ex.Message;
-            await ReportLaunchAsync(app.Id, "failed", ex.Message);
+            footer.Text = "Could not open the app: " + e.Message;
+            await ReportLaunchAsync(app.Id, "failed", e.Message);
         }
         finally { if (!IsDisposed) button.Enabled = true; }
     }
@@ -254,19 +309,99 @@ public sealed class AppPortalForm : Form
     {
         try
         {
-            using var response = await http.PostAsJsonAsync("agent/applications/launched", new { request_id = id, status, detail });
-            await RequireSuccess(response);
+            using var r = await http.PostAsJsonAsync("agent/applications/launched", new { request_id = id, status, detail });
+            await RequireSuccess(r);
         }
-        catch { /* A launch must not crash the client when audit delivery is unavailable. */ }
+        catch { /* Audit transport failures must not crash the launcher. */ }
     }
 
-    private static async Task RequireSuccess(HttpResponseMessage response)
+    internal static async Task RequireSuccess(HttpResponseMessage response)
     {
-        if (!response.IsSuccessStatusCode)
+        if (response.IsSuccessStatusCode) return;
+        var content = await response.Content.ReadAsStringAsync();
+        throw new InvalidOperationException($"Server returned {(int)response.StatusCode}: {content[..Math.Min(170, content.Length)]}");
+    }
+}
+
+// Request creation stays in its own child-friendly window, not a permanent form.
+public sealed class NewAppRequestForm : Form
+{
+    private readonly HttpClient http;
+    private readonly Label chosen;
+    private readonly Label feedback;
+    private readonly TextBox reason;
+    private readonly Button send;
+    private ApplicationCandidate? selected;
+    private bool busy;
+
+    public NewAppRequestForm(HttpClient http)
+    {
+        this.http = http;
+        Text = "Ask for an app";
+        StartPosition = FormStartPosition.CenterParent;
+        Size = new Size(570, 390);
+        MinimumSize = Size;
+        BackColor = Color.FromArgb(24, 36, 57);
+        ForeColor = Color.White;
+        Font = new Font("Segoe UI", 11);
+        var root = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(24), RowCount = 6, ColumnCount = 1 };
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 50));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 54));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 48));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 55));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 38));
+        root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        root.Controls.Add(new Label { Text = "Ask to add something new ✨", Dock = DockStyle.Fill,
+            Font = new Font("Segoe UI Semibold", 19, FontStyle.Bold) }, 0, 0);
+        var choose = new Button { Text = "Choose the game's .exe file…", Dock = DockStyle.Fill,
+            BackColor = Color.FromArgb(66, 101, 158), ForeColor = Color.White, FlatStyle = FlatStyle.Flat };
+        choose.Click += async (_, _) => await ChooseAsync();
+        root.Controls.Add(choose, 0, 1);
+        chosen = new Label { Text = "Nothing selected yet", ForeColor = Color.FromArgb(171, 192, 217), Dock = DockStyle.Fill, AutoEllipsis = true };
+        root.Controls.Add(chosen, 0, 2);
+        reason = new TextBox { Dock = DockStyle.Fill, MaxLength = 400, Multiline = true,
+            PlaceholderText = "Why would you like this app? (optional)", BackColor = Color.FromArgb(13, 23, 41), ForeColor = Color.White };
+        root.Controls.Add(reason, 0, 3);
+        send = new Button { Text = "Send request to parent", Dock = DockStyle.Fill, Enabled = false,
+            BackColor = Color.FromArgb(52, 145, 124), ForeColor = Color.White, FlatStyle = FlatStyle.Flat };
+        send.Click += async (_, _) => await SubmitAsync();
+        root.Controls.Add(send, 0, 4);
+        feedback = new Label { Text = "Your parent will review the app before you can open it.",
+            ForeColor = Color.FromArgb(171, 192, 217), Dock = DockStyle.Fill };
+        root.Controls.Add(feedback, 0, 5);
+        Controls.Add(root);
+    }
+
+    private async Task ChooseAsync()
+    {
+        using var dialog = new OpenFileDialog { Filter = "Windows applications (*.exe)|*.exe", Title = "Choose an application", CheckFileExists = true };
+        if (dialog.ShowDialog(this) != DialogResult.OK) return;
+        busy = true; send.Enabled = false; feedback.Text = "Checking the app…";
+        try
         {
-            var body = await response.Content.ReadAsStringAsync();
-            throw new InvalidOperationException($"Server returned {(int)response.StatusCode}: {body[..Math.Min(body.Length, 180)]}");
+            selected = await ApplicationCandidate.ScanAsync(dialog.FileName);
+            chosen.Text = selected.FileName + "  •  " + selected.SignatureStatus + " signature";
+            feedback.Text = "Looks good! Ready to ask your parent.";
         }
+        catch (Exception ex) { selected = null; feedback.Text = "Could not inspect that app: " + ex.Message; }
+        finally { busy = false; send.Enabled = selected != null; }
+    }
+
+    private async Task SubmitAsync()
+    {
+        if (busy || selected == null) return;
+        busy = true; send.Enabled = false;
+        try
+        {
+            var candidate = await ApplicationCandidate.ScanAsync(selected.FilePath);
+            candidate.Reason = reason.Text.Trim();
+            using var response = await http.PostAsJsonAsync("agent/applications/requests", candidate);
+            await AppPortalForm.RequireSuccess(response);
+            DialogResult = DialogResult.OK;
+            Close();
+        }
+        catch (Exception e) { feedback.Text = "Could not submit request: " + e.Message; }
+        finally { busy = false; if (!IsDisposed) send.Enabled = selected != null; }
     }
 }
 
@@ -355,4 +490,8 @@ public sealed class PortalApplication
     [JsonPropertyName("file_path")] public string FilePath { get; set; } = "";
     [JsonPropertyName("status")] public string Status { get; set; } = "";
     [JsonPropertyName("approval_scope")] public string ApprovalScope { get; set; } = "";
+    [JsonPropertyName("display_name")] public string DisplayName { get; set; } = "";
+    [JsonPropertyName("sha256")] public string Sha256 { get; set; } = "";
+    [JsonPropertyName("artwork_revision")] public int ArtworkRevision { get; set; }
+    [JsonPropertyName("publisher")] public string Publisher { get; set; } = "";
 }

@@ -7,10 +7,14 @@ import secrets
 import uuid
 import json
 import urllib.request
+import urllib.parse
+import io
+import re
 from datetime import date, datetime, timedelta, timezone, time as dt_time
 from pathlib import Path, PureWindowsPath
 from typing import Optional
 from zoneinfo import ZoneInfo
+from PIL import Image, UnidentifiedImageError
 
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
@@ -28,12 +32,15 @@ ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin")
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "change-me")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "dev-only-change-me")
 SCREENSHOT_DIR = Path(os.getenv("SCREENSHOT_DIR", "./screenshots"))
+ARTWORK_DIR = Path(os.getenv("ARTWORK_DIR", str(SCREENSHOT_DIR / "artwork")))
+STEAMGRIDDB_API_KEY = os.getenv("STEAMGRIDDB_API_KEY", "").strip()
 FAMILY_TIMEZONE = os.getenv("FAMILY_TIMEZONE", "Europe/London")
 try:
     FAMILY_TZ = ZoneInfo(FAMILY_TIMEZONE)
 except Exception:
     FAMILY_TZ = timezone.utc
 SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
+ARTWORK_DIR.mkdir(parents=True, exist_ok=True)
 
 connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
 engine = create_engine(DATABASE_URL, future=True, pool_pre_ping=True, connect_args=connect_args)
@@ -201,6 +208,16 @@ class ApplicationApproval(Base):
     signer_thumbprint: Mapped[str] = mapped_column(String(64), default="")
     publisher: Mapped[str] = mapped_column(String(255), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+class ApplicationPresentation(Base):
+    __tablename__ = "application_presentations"
+    sha256: Mapped[str] = mapped_column(String(64), primary_key=True)
+    display_name: Mapped[str] = mapped_column(String(120), default="")
+    artwork_revision: Mapped[int] = mapped_column(Integer, default=0)
+    artwork_file: Mapped[str] = mapped_column(String(130), default="")
+    artwork_credit: Mapped[str] = mapped_column(String(255), default="")
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 
 class ApplicationLaunch(Base):
@@ -983,6 +1000,15 @@ def matching_approval(db: Session, device: Device, info: dict) -> Optional[Appli
     return None
 
 
+def presentation_json(db: Session, digest: str, fallback: str) -> dict:
+    row = db.get(ApplicationPresentation, digest)
+    name = row.display_name if row and row.display_name else Path(fallback).stem
+    revision = row.artwork_revision if row and row.artwork_file else 0
+    return {"display_name": name, "artwork_revision": revision,
+            "artwork_url": f"/api/applications/artwork/{digest}/{revision}" if revision else "",
+            "artwork_credit": row.artwork_credit if row else ""}
+
+
 def request_json(row: ApplicationRequest, db: Session, device: Device | None = None) -> dict:
     d = device or db.get(Device, row.device_id)
     info = {k: getattr(row, k) for k in ('file_name', 'sha256', 'signature_status', 'signer_thumbprint')}
@@ -996,6 +1022,7 @@ def request_json(row: ApplicationRequest, db: Session, device: Device | None = N
         'publisher': row.publisher, 'signer_thumbprint': row.signer_thumbprint,
         'signer_subject': row.signer_subject, 'signer_issuer': row.signer_issuer,
         'reason': row.reason, 'status': status, 'approval_scope': approval.scope if approval else '',
+        **presentation_json(db, row.sha256, row.file_name),
         'created_at': row.created_at.isoformat(), 'reviewed_at': row.reviewed_at.isoformat() if row.reviewed_at else None
     }
 
@@ -1096,3 +1123,162 @@ def revoke_application(approval_id: int, db: Session = Depends(db_session)):
     if not approval: raise HTTPException(404, 'Approval not found')
     db.delete(approval); db.commit()
     return {'ok': True}
+
+
+# ------------------- Centrally managed launcher presentation v0.4.2 -------------------
+# This artwork feature is metadata only; it does not affect approval matching
+# or grant any privileges to the target EXE.
+class PresentationBody(BaseModel):
+    display_name: str
+
+
+class ArtworkChoice(BaseModel):
+    game_id: int
+    artwork_id: int
+
+
+def known_digest(db: Session, digest: str) -> str:
+    digest = digest.lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", digest):
+        raise HTTPException(400, "Invalid SHA-256 fingerprint")
+    if not db.scalar(select(ApplicationRequest.id).where(ApplicationRequest.sha256 == digest)):
+        raise HTTPException(404, "Application not found")
+    return digest
+
+
+def steamgrid_json(path: str) -> dict:
+    if not STEAMGRIDDB_API_KEY:
+        raise HTTPException(503, "Set STEAMGRIDDB_API_KEY on the HomeWatch server to search artwork")
+    url = "https://www.steamgriddb.com/api/v2/" + path
+    request = urllib.request.Request(url, headers={"Authorization": "Bearer " + STEAMGRIDDB_API_KEY,
+                                                  "Accept": "application/json", "User-Agent": "HomeWatch/0.4.2"})
+    try:
+        with urllib.request.urlopen(request, timeout=12) as response:
+            raw = response.read(1_000_001)
+        if len(raw) > 1_000_000: raise ValueError("SteamGridDB response too large")
+        return json.loads(raw)
+    except Exception as ex:
+        raise HTTPException(502, f"SteamGridDB API unavailable: {type(ex).__name__}") from ex
+
+
+def grid_choices(game_id: int) -> list[dict]:
+    if game_id < 1 or game_id > 2**31: raise HTTPException(400, "Invalid game")
+    payload = steamgrid_json(f"grids/game/{game_id}?dimensions=600x900")
+    return [{"id": int(a["id"]), "thumb": str(a.get("thumb", "")),
+             "width": a.get("width"), "height": a.get("height")}
+            for a in payload.get("data", [])[:24] if isinstance(a, dict) and "id" in a]
+
+
+@app.get('/api/applications/artwork/search', dependencies=[Depends(require_admin)])
+def search_game_artwork(q: str):
+    q = q.strip()
+    if len(q) < 2 or len(q) > 80: raise HTTPException(400, "Search for 2–80 characters")
+    data = steamgrid_json("search/autocomplete/" + urllib.parse.quote(q, safe=""))
+    return {"games": [{"id": int(x["id"]), "name": str(x["name"])[:120]}
+                      for x in data.get("data", [])[:12] if "id" in x and "name" in x]}
+
+
+@app.get('/api/applications/artwork/games/{game_id}', dependencies=[Depends(require_admin)])
+def game_artwork(game_id: int):
+    return {"artwork": grid_choices(game_id)}
+
+
+@app.put('/api/applications/{digest}/presentation', dependencies=[Depends(require_admin)])
+def set_app_presentation(digest: str, body: PresentationBody, db: Session = Depends(db_session)):
+    digest = known_digest(db, digest)
+    name = body.display_name.strip()
+    if not (1 <= len(name) <= 120) or any(ord(c) < 32 for c in name):
+        raise HTTPException(400, "Enter a friendly name between 1 and 120 characters")
+    item = db.get(ApplicationPresentation, digest)
+    if not item:
+        item = ApplicationPresentation(sha256=digest)
+        db.add(item)
+    item.display_name = name
+    item.updated_at = datetime.now(timezone.utc)
+    db.commit()
+    return presentation_json(db, digest, name)
+
+
+class NoArtworkRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise ValueError("External image redirect is not allowed")
+
+
+def download_artwork(url: str) -> bytes:
+    parsed = urllib.parse.urlsplit(url)
+    # Only SteamGridDB-owned HTTPS asset hosts, no redirects/credentials/ports.
+    if (parsed.scheme != "https" or parsed.username or parsed.password or parsed.port is not None
+            or not (parsed.hostname == "steamgriddb.com" or (parsed.hostname or "").endswith(".steamgriddb.com"))):
+        raise HTTPException(400, "Artwork URL is not on SteamGridDB")
+    opener = urllib.request.build_opener(NoArtworkRedirect())
+    try:
+        with opener.open(urllib.request.Request(url, headers={"User-Agent": "HomeWatch/0.4.2"}), timeout=15) as response:
+            image_bytes = response.read(6_000_001)
+        if len(image_bytes) > 6_000_000: raise ValueError("Artwork is larger than 6 MB")
+        with Image.open(io.BytesIO(image_bytes)) as img:
+            img.verify()
+        with Image.open(io.BytesIO(image_bytes)) as img:
+            if img.width > 4000 or img.height > 4000 or img.width < 100 or img.height < 100:
+                raise ValueError("Unsupported artwork dimensions")
+            img.thumbnail((600, 900), Image.Resampling.LANCZOS)
+            target = io.BytesIO()
+            img.convert("RGB").save(target, format="JPEG", quality=88, optimize=True)
+            return target.getvalue()
+    except (OSError, ValueError, UnidentifiedImageError) as ex:
+        raise HTTPException(422, f"Cannot process artwork: {type(ex).__name__}") from ex
+
+
+@app.post('/api/applications/{digest}/artwork', dependencies=[Depends(require_admin)])
+def set_app_artwork(digest: str, body: ArtworkChoice, db: Session = Depends(db_session)):
+    digest = known_digest(db, digest)
+    # Resolve the submitted ID against a fresh authenticated SGDB API response.
+    if body.game_id < 1 or body.game_id > 2**31:
+        raise HTTPException(400, "Invalid game")
+    raw = steamgrid_json(f"grids/game/{body.game_id}?dimensions=600x900")
+    grid = next((a for a in raw.get('data', [])[:24]
+                 if isinstance(a, dict) and a.get('id') == body.artwork_id), None)
+    if not grid or not isinstance(grid.get('url'), str):
+        raise HTTPException(400, "Selected artwork is unavailable")
+    binary = download_artwork(grid['url'])
+    item = db.get(ApplicationPresentation, digest)
+    if not item:
+        item = ApplicationPresentation(sha256=digest)
+        db.add(item)
+    revision = item.artwork_revision + 1
+    filename = f"{digest}-{revision}.jpg"
+    temp_path = ARTWORK_DIR / (filename + ".tmp")
+    temp_path.write_bytes(binary)
+    temp_path.replace(ARTWORK_DIR / filename)
+    previous_file = item.artwork_file
+    item.artwork_revision = revision
+    item.artwork_file = filename
+    item.artwork_credit = f"SteamGridDB game {body.game_id}, artwork {body.artwork_id}"
+    item.updated_at = datetime.now(timezone.utc)
+    db.commit()
+    if previous_file and previous_file != filename:
+        (ARTWORK_DIR / previous_file).unlink(missing_ok=True)
+    return presentation_json(db, digest, '')
+
+
+@app.get('/api/applications/artwork/{digest}/{revision}', dependencies=[Depends(require_admin)])
+def admin_serve_artwork(digest: str, revision: int, db: Session = Depends(db_session)):
+    return serve_artwork(digest, revision, db)
+
+
+@app.get('/agent/applications/artwork/{digest}/{revision}')
+def agent_serve_artwork(digest: str, revision: int, device: Device = Depends(agent_auth),
+                        db: Session = Depends(db_session)):
+    # Restrict artwork requests to binaries actually requested on this device.
+    known_digest(db, digest)
+    if not db.scalar(select(ApplicationRequest.id).where(
+        ApplicationRequest.device_id == device.id, ApplicationRequest.sha256 == digest)):
+        raise HTTPException(404, 'Artwork unavailable')
+    return serve_artwork(digest, revision, db)
+
+
+def serve_artwork(digest: str, revision: int, db: Session):
+    item = db.get(ApplicationPresentation, digest)
+    if not item or not item.artwork_file or item.artwork_revision != revision:
+        raise HTTPException(404, "Artwork not found")
+    return FileResponse(ARTWORK_DIR / item.artwork_file, media_type="image/jpeg",
+                        headers={"Cache-Control": "private, max-age=3600", "X-Content-Type-Options": "nosniff"})

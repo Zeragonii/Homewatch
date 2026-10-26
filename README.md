@@ -1,3 +1,7 @@
+# HomeWatch v0.4.2 — Poster-Grid My Apps Launcher
+
+See [RELEASE-v0.4.2.md](RELEASE-v0.4.2.md) for poster art configuration, Portainer storage, desktop UI changes, deployment and updater test steps.
+
 # HomeWatch v0.4.1 — Update Reliability
 
 See [RELEASE-v0.4.1.md](RELEASE-v0.4.1.md) for the updater-size fix, desktop shortcut behaviour, diagnostic status and optional Windows code-signing configuration. The legacy updater may need one verified, administrator-approved installer upgrade to enable the repaired silent-update path. Avoid disabling Windows security features.

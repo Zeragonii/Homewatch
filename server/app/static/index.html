@@ -42,6 +42,22 @@
   <section class="card"><details><summary><b>Request and launch history</b></summary><div id="appHistory"></div></details></section>
 </section>
 
+<dialog id="appEditor" class="app-editor" aria-labelledby="appEditorTitle">
+  <div class="app-editor-head"><div><h3 id="appEditorTitle">Edit launcher tile</h3><p class="muted small">Changes are shared by all devices with this exact application.</p></div><button class="secondary" onclick="closeAppEditor()">Close</button></div>
+  <div class="app-editor-body">
+    <div class="app-editor-preview"><img id="appEditorPoster" alt="Current launcher poster" class="hidden"><div id="appEditorPlaceholder">No artwork yet</div></div>
+    <div class="app-editor-tools">
+      <label for="appFriendlyName" class="muted small">Friendly application name</label>
+      <div class="row"><input id="appFriendlyName" maxlength="120" placeholder="e.g. Minecraft" style="flex:1;min-width:180px"><button onclick="saveAppFriendlyName()">Save name</button></div>
+      <p class="muted small">Poster artwork — SteamGridDB (requires API key on your server)</p>
+      <div class="row"><input id="appArtworkSearch" placeholder="Search games / software" style="flex:1;min-width:180px" maxlength="80"><button class="secondary" onclick="searchAppArtwork()">Find posters</button></div>
+      <div id="appArtworkGames" class="artwork-games"></div>
+      <div id="appArtworkGrids" class="artwork-grids"></div>
+      <p id="appEditorFeedback" class="muted small" role="status"></p>
+    </div>
+  </div>
+</dialog>
+
 <section id="view-onboarding" class="view hidden">
   <div class="page-title"><div><h2>Onboarding</h2><p class="muted">Create child profiles and approve new agents here.</p></div></div>
   <section class="card"><div class="row"><div><h2>Children</h2><p class="muted">Create profiles before approving devices.</p></div><div class="row"><input id="childName" placeholder="Child name"><button onclick="addChild()">Add</button></div></div><div id="children" class="chips"></div></section>

@@ -221,6 +221,7 @@ async function loadApplications(force=false){
     const pending=data.requests.filter(r=>r.status==='pending');
     document.getElementById('appPendingCount').textContent=pending.length;
     const badge=document.getElementById('appRequestBadge');badge.textContent=pending.length;badge.classList.toggle('hidden',!pending.length);
+    lastApplicationsData=data;
     const snapshot=JSON.stringify(data);
     if(!force && snapshot===lastApplicationSnapshot)return;
     // Keep any scope dropdown currently being edited when the 5-second heartbeat fires.
@@ -228,13 +229,13 @@ async function loadApplications(force=false){
     lastApplicationSnapshot=snapshot;
     const requests=document.getElementById('appRequests');
     requests.innerHTML=pending.length?`<div class="app-wrap"><table class="app-table"><thead><tr><th>Application</th><th>Requested by</th><th>Signature</th><th>Decision</th></tr></thead><tbody>${pending.map(r=>`<tr>
-      <td><b>${esc(r.file_name)}</b><div class="meta">${esc(r.file_path)}</div><details><summary class="muted small">Fingerprint & signer details</summary><div class="fingerprint">SHA-256: ${esc(r.sha256)}</div><div class="meta">Certificate: ${esc(r.signer_thumbprint||'None')}<br>Subject: ${esc(r.signer_subject||'—')}<br>Issuer: ${esc(r.signer_issuer||'—')}</div></details></td>
+      <td><b>${esc(r.display_name)}</b><button class="subtle-action" onclick="openAppEditor('${r.sha256}','${r.id}')">Edit tile</button><div class="meta">${esc(r.file_name)} · ${esc(r.file_path)}</div><details><summary class="muted small">Fingerprint & signer details</summary><div class="fingerprint">SHA-256: ${esc(r.sha256)}</div><div class="meta">Certificate: ${esc(r.signer_thumbprint||'None')}<br>Subject: ${esc(r.signer_subject||'—')}<br>Issuer: ${esc(r.signer_issuer||'—')}</div></details></td>
       <td>${esc(r.child_name)}<div class="meta">${esc(r.device_name)}</div>${r.reason?`<div class="meta">“${esc(r.reason)}”</div>`:''}</td>
       <td><span class="signature sig-${escAttr(r.signature_status)}">${esc(r.signature_status)}</span><div class="meta">${esc(r.publisher||'Unknown publisher')}</div></td>
       <td><div class="row-actions"><select id="app-scope-${r.id}" aria-label="Approval scope"><option value="device">This device</option><option value="child">Child's devices</option>${r.signature_status==='valid'&&r.signer_thumbprint?'<option value="global">Entire family</option>':''}</select><button class="accept" onclick="decideApplication(${r.id},'approved')">Approve</button><button class="warn" onclick="decideApplication(${r.id},'denied')">Deny</button></div></td>
     </tr>`).join('')}</tbody></table></div>`:'<div class="app-empty">All caught up — no pending application requests.</div>';
     const approvals=document.getElementById('appApprovals');
-    approvals.innerHTML=data.approvals.length?`<div class="app-wrap"><table class="app-table"><thead><tr><th>Application</th><th>Scope</th><th>Fingerprint</th><th></th></tr></thead><tbody>${data.approvals.map(a=>`<tr><td><b>${esc(a.file_name)}</b><div class="meta">${esc(a.publisher||'Unsigned / unknown')}</div></td><td>${esc(a.scope==='global'?'Entire family':a.scope==='child'?'Child devices':'One device')}</td><td><span class="fingerprint">${esc(a.sha256.substring(0,20))}…</span></td><td><button class="secondary" onclick="revokeApplication(${a.id})">Revoke</button></td></tr>`).join('')}</tbody></table></div>`:'<div class="app-empty">No active application approvals.</div>';
+    approvals.innerHTML=data.approvals.length?`<div class="app-wrap"><table class="app-table"><thead><tr><th>Application</th><th>Scope</th><th>Fingerprint</th><th></th></tr></thead><tbody>${data.approvals.map(a=>`<tr><td><b>${esc(a.display_name)}</b><button class="subtle-action" onclick="openAppEditor('${a.sha256}')">Edit tile</button><div class="meta">${esc(a.file_name)} · ${esc(a.publisher||'Unsigned / unknown')}</div></td><td>${esc(a.scope==='global'?'Entire family':a.scope==='child'?'Child devices':'One device')}</td><td><span class="fingerprint">${esc(a.sha256.substring(0,20))}…</span></td><td><button class="secondary" onclick="revokeApplication(${a.id})">Revoke</button></td></tr>`).join('')}</tbody></table></div>`:'<div class="app-empty">No active application approvals.</div>';
     document.getElementById('appHistory').innerHTML=`<div class="app-wrap"><table class="app-table"><tbody>${data.requests.filter(r=>r.status!=='pending').slice(0,30).map(r=>`<tr><td>${esc(r.file_name)}<div class="meta">${esc(r.child_name)} · ${esc(r.device_name)}</div></td><td>${esc(r.status)}</td><td class="muted">${esc(new Date(r.created_at).toLocaleString())}</td></tr>`).join('')}${data.launches.slice(0,15).map(x=>`<tr><td>Launch #${x.request_id}<div class="meta">${esc(x.detail)}</div></td><td>${esc(x.status)}</td><td class="muted">${esc(new Date(x.created_at).toLocaleString())}</td></tr>`).join('')}</tbody></table></div>`;
   }catch(e){document.getElementById('appRequests').textContent=`Unable to load applications: ${e.message}`}
 }
@@ -247,3 +248,67 @@ async function decideApplication(id,decision){
 async function revokeApplication(id){if(!confirm('Revoke this approval?'))return;try{await api(`/api/applications/approvals/${id}`,{method:'DELETE'});lastApplicationSnapshot='';await loadApplications(true)}catch(e){alert(e.message)}}
 
 (async()=>{try{await refresh();loginPanel.classList.add('hidden');appPanel.classList.remove('hidden');showView(currentView);if(!refreshTimer)refreshTimer=setInterval(refresh,5000)}catch{}})();
+
+// Centrally managed display names and SteamGridDB poster selection.
+let lastApplicationsData={requests:[],approvals:[]};
+let editingDigest='';
+let artworkGameId=0;
+function artPosterURL(a){return a?.artwork_url||''}
+function closeAppEditor(){document.getElementById('appEditor').close()}
+function editorMessage(s){document.getElementById('appEditorFeedback').textContent=s}
+function openAppEditor(digest){
+  const a=[...(lastApplicationsData.requests||[]),...(lastApplicationsData.approvals||[])].find(r=>r.sha256===digest);
+  if(!a)return;
+  editingDigest=digest;artworkGameId=0;
+  document.getElementById('appFriendlyName').value=a.display_name||a.file_name;
+  document.getElementById('appArtworkSearch').value=a.display_name||'';
+  document.getElementById('appArtworkGames').replaceChildren();
+  document.getElementById('appArtworkGrids').replaceChildren();
+  const poster=document.getElementById('appEditorPoster');
+  poster.src=a.artwork_url||'';poster.classList.toggle('hidden',!a.artwork_url);
+  document.getElementById('appEditorPlaceholder').classList.toggle('hidden',!!a.artwork_url);
+  editorMessage('Search SteamGridDB to choose a portrait poster, then save your name.');
+  document.getElementById('appEditor').showModal();
+}
+async function saveAppFriendlyName(){
+  if(!editingDigest)return;
+  try{
+    await api(`/api/applications/${editingDigest}/presentation`,{method:'PUT',body:JSON.stringify({display_name:document.getElementById('appFriendlyName').value})});
+    editorMessage('Friendly name saved. Clients will see it on their next refresh.');lastApplicationSnapshot='';await loadApplications(true);
+  }catch(e){editorMessage(e.message)}
+}
+async function searchAppArtwork(){
+  const q=document.getElementById('appArtworkSearch').value.trim();if(q.length<2){editorMessage('Enter at least two characters.');return}
+  editorMessage('Searching SteamGridDB…');
+  document.getElementById('appArtworkGames').replaceChildren();document.getElementById('appArtworkGrids').replaceChildren();
+  try{
+    const data=await api('/api/applications/artwork/search?q='+encodeURIComponent(q));
+    const host=document.getElementById('appArtworkGames');
+    data.games.forEach(g=>{
+      const btn=document.createElement('button');btn.className='secondary';btn.textContent=g.name;
+      btn.onclick=()=>loadArtworkGrids(g.id);host.appendChild(btn);
+    });editorMessage(data.games.length?'Select the game to view its posters.':'No matching games found.');
+  }catch(e){editorMessage(e.message)}
+}
+async function loadArtworkGrids(gameId){
+  artworkGameId=gameId;editorMessage('Loading poster choices…');
+  const host=document.getElementById('appArtworkGrids');host.replaceChildren();
+  try{
+    const data=await api(`/api/applications/artwork/games/${gameId}`);
+    data.artwork.forEach(a=>{
+      const button=document.createElement('button');button.className='artwork-grid-choice';button.title='Use this poster';
+      const img=document.createElement('img');img.src=a.thumb;img.loading='lazy';img.alt='SteamGridDB poster';
+      button.appendChild(img);button.onclick=()=>chooseArtwork(a.id);host.appendChild(button);
+    });editorMessage(data.artwork.length?'Click the poster you want to use.':'No portrait posters found for this game.');
+  }catch(e){editorMessage(e.message)}
+}
+async function chooseArtwork(artworkId){
+  if(!editingDigest||!artworkGameId)return;editorMessage('Downloading and caching selected poster on the server…');
+  try{
+    const data=await api(`/api/applications/${editingDigest}/artwork`,{method:'POST',body:JSON.stringify({game_id:artworkGameId,artwork_id:artworkId})});
+    const img=document.getElementById('appEditorPoster');img.src=data.artwork_url;img.classList.remove('hidden');
+    document.getElementById('appEditorPlaceholder').classList.add('hidden');
+    editorMessage('Poster saved centrally. Windows clients will fetch the new revision once.');
+    lastApplicationSnapshot='';await loadApplications(true);
+  }catch(e){editorMessage(e.message)}
+}

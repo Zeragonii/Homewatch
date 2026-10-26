@@ -221,3 +221,64 @@ def test_updater_status_reaches_admin_dashboard():
     row = next(d for d in dashboard.json()['devices'] if d['id'] == device_id)
     assert row['update_status'] == payload['update_status']
     assert row['agent_version'] == '0.4.1'
+
+
+def test_presentation_name_and_poster_follow_agent_and_approval(monkeypatch):
+    from server.app import main as hw
+    import io
+    from PIL import Image
+
+    device, auth = _make_app_device()
+    app_request = client.post('/agent/applications/requests', headers=auth,
+                              json=_app_candidate('8')).json()
+    digest = '8' * 64
+    assert app_request['display_name'] == 'Play'
+    assert client.put(f'/api/applications/{digest}/presentation',
+                      json={'display_name': 'Super Fun Adventure'}).status_code == 200
+    catalog = client.get('/agent/applications',headers=auth).json()['applications']
+    assert any(r['display_name']=='Super Fun Adventure' for r in catalog)
+
+    # SteamGridDB responses mocked: tests do not consume API quota or use the network.
+    def fake_grid(path):
+        if path.startswith('grids/game/123'):
+            return {'data':[{'id':456,'thumb':'https://images.steamgriddb.com/thumb.jpg',
+                             'url':'https://images.steamgriddb.com/original.jpg'}]}
+        return {'data': [{'id':123,'name':'Super Fun Adventure'}]}
+    monkeypatch.setattr(hw, 'steamgrid_json', fake_grid)
+    image = Image.new('RGB',(600,900),'navy')
+    out = io.BytesIO(); image.save(out,'JPEG'); binary=out.getvalue()
+    monkeypatch.setattr(hw,'download_artwork', lambda _: binary)
+
+    assert client.get('/api/applications/artwork/search?q=fun').json()['games'][0]['id'] == 123
+    assert client.get('/api/applications/artwork/games/123').json()['artwork'][0]['id'] == 456
+    assert client.post(f'/api/applications/{digest}/artwork',
+                       json={'game_id':123,'artwork_id':456}).status_code == 200
+    apps = client.get('/agent/applications',headers=auth).json()['applications']
+    item = next(a for a in apps if a['id']==app_request['id'])
+    assert item['artwork_revision'] == 1
+    assert item['display_name']=='Super Fun Adventure'
+    poster = client.get(f'/agent/applications/artwork/{digest}/1',headers=auth)
+    assert poster.status_code == 200 and poster.content == binary
+    # Other enrolled devices cannot retrieve artwork for apps they haven't requested.
+    other, other_auth = _make_app_device()
+    assert client.get(f'/agent/applications/artwork/{digest}/1',headers=other_auth).status_code==404
+    # An art change does not confer permission to launch or change the EXE's hash.
+    assert client.post(f"/agent/applications/{app_request['id']}/verify",
+                       headers=auth,json=_app_candidate('8')).status_code == 403
+    assert client.post(f'/api/applications/requests/{app_request["id"]}/decision',
+                       json={'decision':'approved','scope':'device'}).status_code == 200
+    assert client.post(f"/agent/applications/{app_request['id']}/verify",
+                       headers=auth,json=_app_candidate('8')).status_code == 200
+    assert client.get('/agent/applications',headers=auth).json()['applications'][0]['display_name']=='Super Fun Adventure'
+
+
+def test_presentation_auth_and_input_rejections():
+    from server.app.main import download_artwork
+    digest = '7'*64
+    assert client.put(f'/api/applications/{digest}/presentation',json={'display_name':'Anything'}).status_code==404
+    assert client.get('/api/applications/artwork/search?q=x').status_code==400
+    try:
+        download_artwork('http://localhost/admin')
+        assert False, 'SSRF URL was accepted'
+    except Exception as e:
+        assert '400' in str(e.status_code) if hasattr(e,'status_code') else False
