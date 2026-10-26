@@ -42,7 +42,7 @@ jobs:
           if ($env:GITHUB_REF -like 'refs/tags/v*') {
             $version = $env:GITHUB_REF_NAME.Substring(1)
           } else {
-            $version = '0.4.0'
+            $version = '0.4.1'
           }
           "HOMEWATCH_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           Write-Host "Building HomeWatch Agent $version"
@@ -74,13 +74,44 @@ jobs:
           dotnet publish agent/HomeWatchUpdater/HomeWatchUpdater.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:Version=$env:HOMEWATCH_VERSION -o out/updater
           if ($LASTEXITCODE -ne 0) { throw "HomeWatchUpdater publish failed ($LASTEXITCODE)" }
           Copy-Item out/updater/HomeWatchUpdater.exe out/agent/HomeWatchUpdater.exe -Force
-          # Add Authenticode signing here once a signing certificate is configured.
-          # The privileged updater rejects unexpected archive members. Ship
-          # exactly these three root-level executables (no PDBs or sidecars).
+          # Signing happens in the optional signing step below, before ZIP creation.
+      - name: Sign Windows binaries when a trusted publisher certificate is configured
+        shell: pwsh
+        env:
+          SIGNING_PFX_BASE64: ${{ secrets.HOMEWATCH_SIGNING_PFX_BASE64 }}
+          SIGNING_PFX_PASSWORD: ${{ secrets.HOMEWATCH_SIGNING_PFX_PASSWORD }}
+        run: |
+          if ([string]::IsNullOrEmpty($env:SIGNING_PFX_BASE64) -and [string]::IsNullOrEmpty($env:SIGNING_PFX_PASSWORD)) {
+            Write-Warning 'Unsigned build: configure HOMEWATCH_SIGNING_PFX_BASE64 and HOMEWATCH_SIGNING_PFX_PASSWORD to sign releases. Do not turn off Windows security protections.'
+            exit 0
+          }
+          if ([string]::IsNullOrEmpty($env:SIGNING_PFX_BASE64) -or [string]::IsNullOrEmpty($env:SIGNING_PFX_PASSWORD)) { throw 'Both signing secrets are required' }
+          $certPath = Join-Path $env:RUNNER_TEMP 'homewatch-signing.pfx'
+          try {
+            [IO.File]::WriteAllBytes($certPath, [Convert]::FromBase64String($env:SIGNING_PFX_BASE64))
+            $tool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Recurse -Filter signtool.exe |
+              Where-Object { $_.FullName.EndsWith('\x64\signtool.exe', [StringComparison]::OrdinalIgnoreCase) } | Select-Object -Last 1
+            if (-not $tool) { throw 'Windows SDK signtool.exe unavailable on runner' }
+            'out/agent/HomeWatchAgent.exe','out/agent/HomeWatchService.exe','out/agent/HomeWatchUpdater.exe' | ForEach-Object {
+              & $tool.FullName sign /fd SHA256 /f $certPath /p $env:SIGNING_PFX_PASSWORD /tr http://timestamp.digicert.com /td SHA256 $_
+              if ($LASTEXITCODE -ne 0) { throw "Signing failed: $_" }
+            }
+            "SIGNTOOL_PATH=$($tool.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
+          } finally { Remove-Item $certPath -Force -ErrorAction SilentlyContinue }
+
+      - name: Package exact updater binaries
+        shell: pwsh
+        run: |
+          # The privileged updater rejects unexpected archive members.
+          # Ship exactly these three root-level executables (no PDBs or sidecars).
           $allowed = @('HomeWatchAgent.exe', 'HomeWatchService.exe', 'HomeWatchUpdater.exe')
           $paths = @($allowed | ForEach-Object { "out/agent/$_" })
-          foreach ($file in $paths) { if (-not (Test-Path $file)) { throw "Missing expected output: $file" } }
+          foreach ($file in $paths) {
+            if (-not (Test-Path $file)) { throw "Missing expected output: $file" }
+            if ((Get-Item $file).Length -gt 200MB) { throw "Updater executable exceeds 200 MiB limit: $file" }
+          }
           Compress-Archive -LiteralPath $paths -DestinationPath HomeWatch-Agent-win-x64.zip -Force
+          if ((Get-Item HomeWatch-Agent-win-x64.zip).Length -gt 350MB) { throw 'Updater archive exceeds 350 MiB limit' }
           Add-Type -AssemblyName System.IO.Compression
           $zip = [System.IO.Compression.ZipFile]::OpenRead((Join-Path $PWD 'HomeWatch-Agent-win-x64.zip'))
           try {
@@ -96,10 +127,22 @@ jobs:
 
       - name: Build Windows installer
         shell: pwsh
+        env:
+          SIGNING_PFX_BASE64: ${{ secrets.HOMEWATCH_SIGNING_PFX_BASE64 }}
+          SIGNING_PFX_PASSWORD: ${{ secrets.HOMEWATCH_SIGNING_PFX_PASSWORD }}
         run: |
           $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
           & $iscc "/DMyAppVersion=$env:HOMEWATCH_VERSION" "agent\installer\HomeWatchAgent.iss"
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup compilation failed ($LASTEXITCODE)" }
           Copy-Item out/installer/HomeWatch-Agent-Setup-win-x64.exe HomeWatch-Agent-Setup-win-x64.exe -Force
+          if (-not [string]::IsNullOrWhiteSpace($env:SIGNTOOL_PATH)) {
+            $certPath = Join-Path $env:RUNNER_TEMP 'homewatch-signing.pfx'
+            try {
+              [IO.File]::WriteAllBytes($certPath, [Convert]::FromBase64String($env:SIGNING_PFX_BASE64))
+              & $env:SIGNTOOL_PATH sign /fd SHA256 /f $certPath /p $env:SIGNING_PFX_PASSWORD /tr http://timestamp.digicert.com /td SHA256 HomeWatch-Agent-Setup-win-x64.exe
+              if ($LASTEXITCODE -ne 0) { throw 'Installer signing failed' }
+            } finally { Remove-Item $certPath -Force -ErrorAction SilentlyContinue }
+          }
           (Get-FileHash HomeWatch-Agent-Setup-win-x64.exe -Algorithm SHA256).Hash.ToLower() | Out-File -Encoding ascii HomeWatch-Agent-Setup-win-x64.sha256
 
       - uses: actions/upload-artifact@v4

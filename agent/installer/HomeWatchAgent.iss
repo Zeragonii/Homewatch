@@ -1,5 +1,5 @@
 #ifndef MyAppVersion
-  #define MyAppVersion "0.4.0"
+  #define MyAppVersion "0.4.1"
 #endif
 #define MyAppName "HomeWatch Agent"
 #define MyAppPublisher "HomeWatch"
@@ -46,7 +46,7 @@ Root: HKLM; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: 
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: none; ValueName: "HomeWatchAgent"; Flags: deletevalue
 
 [Tasks]
-Name: "myappsdesktop"; Description: "Create a My Apps shortcut on the desktop"; Flags: unchecked
+Name: "myappsdesktop"; Description: "Create a My Apps shortcut on the desktop"
 
 [Icons]
 Name: "{autoprograms}\HomeWatch Agent"; Filename: "{app}\{#MyAppExeName}"

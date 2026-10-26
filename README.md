@@ -1,3 +1,9 @@
+# HomeWatch v0.4.1 — Update Reliability
+
+See [RELEASE-v0.4.1.md](RELEASE-v0.4.1.md) for the updater-size fix, desktop shortcut behaviour, diagnostic status and optional Windows code-signing configuration. The legacy updater may need one verified, administrator-approved installer upgrade to enable the repaired silent-update path. Avoid disabling Windows security features.
+
+---
+
 # HomeWatch v0.2.6.5
 
 A self-hosted, multi-device parental monitoring MVP with a Windows tray agent.

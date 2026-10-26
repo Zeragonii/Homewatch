@@ -204,3 +204,20 @@ def test_launch_audit_is_device_scoped():
     assert client.post('/agent/applications/launched',headers=headers_a,json=body).status_code == 200
     audit=client.get('/api/applications').json()['launches']
     assert any(x['request_id']==queued['id'] and x['status']=='failed' for x in audit)
+
+
+def test_updater_status_reaches_admin_dashboard():
+    device_id, headers = _make_app_device()
+    payload = {
+        'hostname': 'KID-PC', 'os_version': 'Windows',
+        'agent_version': '0.4.1', 'current_app': 'game.exe',
+        'logged_in_user': 'Kid',
+        'update_status': 'failed: release archive exceeds legacy limit'
+    }
+    response = client.post('/agent/heartbeat', headers=headers, json=payload)
+    assert response.status_code == 200, response.text
+    dashboard = client.get('/api/dashboard')
+    assert dashboard.status_code == 200
+    row = next(d for d in dashboard.json()['devices'] if d['id'] == device_id)
+    assert row['update_status'] == payload['update_status']
+    assert row['agent_version'] == '0.4.1'

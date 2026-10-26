@@ -101,6 +101,7 @@ class Device(Base):
     token_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     current_app: Mapped[str] = mapped_column(String(255), default="")
     logged_in_user: Mapped[str] = mapped_column(String(255), default="")
+    update_status: Mapped[str] = mapped_column(String(600), default="")
     last_seen: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     child: Mapped[Child] = relationship(back_populates="devices")
@@ -220,6 +221,8 @@ with engine.begin() as conn:
     device_columns = {c["name"] for c in inspect(conn).get_columns("devices")}
     if "logged_in_user" not in device_columns:
         conn.execute(text("ALTER TABLE devices ADD COLUMN logged_in_user VARCHAR(255) NOT NULL DEFAULT ''"))
+    if "update_status" not in device_columns:
+        conn.execute(text("ALTER TABLE devices ADD COLUMN update_status VARCHAR(600) NOT NULL DEFAULT ''"))
 
 app = FastAPI(title=APP_TITLE)
 static_dir = Path(__file__).parent / "static"
@@ -296,6 +299,7 @@ class HeartbeatBody(BaseModel):
     agent_version: str
     current_app: str = ""
     logged_in_user: str = ""
+    update_status: str = ""
 
 
 class ActivityBody(BaseModel):
@@ -491,6 +495,12 @@ def dashboard(db: Session = Depends(db_session)):
                 "completed_at": row.completed_at.isoformat() if row.completed_at else None,
             })
     now = datetime.now(timezone.utc)
+    def seen_at_utc(value: datetime | None) -> datetime | None:
+        if value is None:
+            return None
+        # SQLite (used in smoke tests) returns naive timestamps even for a
+        # timezone-aware column; PostgreSQL returns proper timestamptz values.
+        return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
     pending_app_rows = db.scalars(select(ApplicationRequest).where(ApplicationRequest.status == "pending")).all()
     pending_app_count = sum(1 for r in pending_app_rows if not matching_approval(db, db.get(Device, r.device_id), {
         "file_name": r.file_name, "sha256": r.sha256,
@@ -518,8 +528,9 @@ def dashboard(db: Session = Depends(db_session)):
                 "agent_version": d.agent_version,
                 "current_app": d.current_app,
                 "logged_in_user": d.logged_in_user,
+                "update_status": d.update_status,
                 "last_seen": d.last_seen.isoformat() if d.last_seen else None,
-                "online": bool(d.last_seen and (now - d.last_seen) < timedelta(seconds=45)),
+                "online": bool(d.last_seen and (now - seen_at_utc(d.last_seen)) < timedelta(seconds=45)),
                 "activity": sorted(activity.get(d.id, []), key=lambda x: x["seconds"], reverse=True)[:8],
                 "commands": command_history.get(d.id, []),
             } for d in devices
@@ -749,6 +760,7 @@ def heartbeat(body: HeartbeatBody, device: Device = Depends(agent_auth), db: Ses
     managed.hostname, managed.os_version, managed.agent_version = body.hostname, body.os_version, body.agent_version
     managed.current_app = body.current_app[:255]
     managed.logged_in_user = body.logged_in_user[:255]
+    managed.update_status = body.update_status[:600]
     managed.last_seen = datetime.now(timezone.utc)
     db.commit()
     return {"ok": True}

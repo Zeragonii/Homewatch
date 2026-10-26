@@ -100,6 +100,7 @@ public sealed class AgentContext : ApplicationContext
         tray.ContextMenuStrip = menu;
 
         LoadOrCreateConfig();
+        EnsureDesktopShortcut();
         if (string.IsNullOrWhiteSpace(config.ServerUrl))
         {
             using var setup = new ServerSetupForm();
@@ -193,7 +194,7 @@ public sealed class AgentContext : ApplicationContext
 
     async Task HeartbeatAsync()
     {
-        using var content = JsonContent.Create(new { hostname = Environment.MachineName, os_version = Environment.OSVersion.VersionString, agent_version = AgentVersion, current_app = currentApp, logged_in_user = LoggedInUser() });
+        using var content = JsonContent.Create(new { hostname = Environment.MachineName, os_version = Environment.OSVersion.VersionString, agent_version = AgentVersion, current_app = currentApp, logged_in_user = LoggedInUser(), update_status = ReadUpdateStatus() });
         using var r = Request(HttpMethod.Post, "agent/heartbeat", content);
         await http.SendAsync(r); lastHeartbeat = DateTime.UtcNow;
     }
@@ -506,7 +507,7 @@ public sealed class AgentContext : ApplicationContext
         var installed = Path.Combine(AppContext.BaseDirectory, "HomeWatchService.exe");
         if (!File.Exists(installed))
         {
-            if (commandId.HasValue) await CompleteAsync(commandId.Value, "machine updater service not installed");
+            if (commandId.HasValue) await CompleteAsync(commandId.Value, "machine updater service binary missing");
             return;
         }
         try
@@ -516,7 +517,7 @@ public sealed class AgentContext : ApplicationContext
                 var marker = Path.Combine(dataDir, "check-update.request");
                 File.WriteAllText(marker, DateTime.UtcNow.Ticks.ToString());
             }
-            if (commandId.HasValue) await CompleteAsync(commandId.Value, "update check requested from privileged service");
+            if (commandId.HasValue) await CompleteAsync(commandId.Value, "Update check queued; watch the updater status shown on the device card for the actual outcome.");
         }
         catch (Exception ex)
         {
@@ -540,7 +541,67 @@ public sealed class AgentContext : ApplicationContext
         else { appPortal.Show(); appPortal.Activate(); appPortal.BringToFront(); }
     }
 
-    void ShowStatus() => MessageBox.Show($"Server: {config.ServerUrl}\nDevice: {config.DeviceId ?? "Awaiting approval"}\nVersion: {AgentVersion}\nUser: {LoggedInUser()}\nCurrent app: {currentApp}", "HomeWatch Agent");
+    // Report service-written status; no child/user process is permitted to
+    // write the protected Program Files\HomeWatch\.updates status file.
+    static string ReadUpdateStatus()
+    {
+        try
+        {
+            var path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
+                "HomeWatch", ".updates", "status.json");
+            if (!File.Exists(path)) return "Updater status unavailable";
+            using var doc = JsonDocument.Parse(File.ReadAllText(path));
+            var root = doc.RootElement;
+            string phase = root.GetProperty("phase").GetString() ?? "unknown";
+            string message = root.GetProperty("message").GetString() ?? "";
+            string version = root.TryGetProperty("version", out var v) ? v.GetString() ?? "" : "";
+            return $"{phase}: {message}" + (version.Length > 0 ? $" ({version})" : "");
+        }
+        catch { return "Unable to read updater status"; }
+    }
+
+    // Install the child-facing shortcut once per Windows profile, including on
+    // an existing machine upgraded remotely without rerunning the MSI/installer.
+    void EnsureDesktopShortcut()
+    {
+        var marker = Path.Combine(logDir, "myapps-shortcut-initialized");
+        if (File.Exists(marker)) return;
+        object? shell = null, shortcut = null;
+        try
+        {
+            var desktop = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
+            if (string.IsNullOrWhiteSpace(desktop)) return;
+            var linkPath = Path.Combine(desktop, "HomeWatch My Apps.lnk");
+            var commonDesktop = Environment.GetFolderPath(Environment.SpecialFolder.CommonDesktopDirectory);
+            var commonLink = Path.Combine(commonDesktop, "HomeWatch My Apps.lnk");
+            if (!File.Exists(linkPath) && !File.Exists(commonLink))
+            {
+                var shellType = Type.GetTypeFromProgID("WScript.Shell");
+                if (shellType is null) return;
+                shell = Activator.CreateInstance(shellType);
+                if (shell is null) return;
+                shortcut = shellType.InvokeMember("CreateShortcut",
+                    BindingFlags.InvokeMethod, null, shell, new object[] { linkPath });
+                if (shortcut is null) return;
+                var type = shortcut.GetType();
+                var exe = Path.Combine(AppContext.BaseDirectory, "HomeWatchAgent.exe");
+                type.InvokeMember("TargetPath", BindingFlags.SetProperty, null, shortcut, new object[] { exe });
+                type.InvokeMember("Arguments", BindingFlags.SetProperty, null, shortcut, new object[] { "--apps" });
+                type.InvokeMember("WorkingDirectory", BindingFlags.SetProperty, null, shortcut, new object[] { AppContext.BaseDirectory });
+                type.InvokeMember("Description", BindingFlags.SetProperty, null, shortcut, new object[] { "My HomeWatch apps and requests" });
+                type.InvokeMember("Save", BindingFlags.InvokeMethod, null, shortcut, null);
+            }
+            File.WriteAllText(marker, "Created once; remove the shortcut manually if unwanted.");
+        }
+        catch (Exception ex) { Log("Desktop shortcut: " + ex.Message); }
+        finally
+        {
+            if (shortcut is not null && Marshal.IsComObject(shortcut)) Marshal.ReleaseComObject(shortcut);
+            if (shell is not null && Marshal.IsComObject(shell)) Marshal.ReleaseComObject(shell);
+        }
+    }
+
+    void ShowStatus() => MessageBox.Show($"Server: {config.ServerUrl}\nDevice: {config.DeviceId ?? "Awaiting approval"}\nVersion: {AgentVersion}\nUser: {LoggedInUser()}\nCurrent app: {currentApp}\nUpdater: {ReadUpdateStatus()}", "HomeWatch Agent");
 
     static string GetAgentVersion()
     {
