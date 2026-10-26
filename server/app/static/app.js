@@ -22,7 +22,7 @@ const lastRefresh=document.getElementById('lastRefresh');
 async function api(url, options={}){const r=await fetch(url,{headers:{'Content-Type':'application/json',...(options.headers||{})},...options});if(r.status===401)throw new Error('AUTH');if(!r.ok){let m='Request failed';try{m=(await r.json()).detail||m}catch{}throw new Error(m)}const ct=r.headers.get('content-type')||'';return ct.includes('json')?r.json():r}
 async function login(){try{await api('/api/login',{method:'POST',body:JSON.stringify({username:usernameInput.value,password:passwordInput.value})});await showApp();}catch(e){loginErrorEl.textContent=e.message==='AUTH'?'Invalid credentials':e.message}}
 async function logout(){await fetch('/api/logout',{method:'POST'});location.reload()}
-async function showApp(){loginPanel.classList.add('hidden');appPanel.classList.remove('hidden');await refresh();if(!refreshTimer)refreshTimer=setInterval(refresh,5000)}
+async function showApp(){loginPanel.classList.add('hidden');appPanel.classList.remove('hidden');await refresh();if(!refreshTimer)refreshTimer=setInterval(refresh,5000);await loadNasSettings()}
 
 function showView(view){currentView=view;['dashboard','screentime','applications','onboarding'].forEach(v=>{document.getElementById(`view-${v}`).classList.toggle('hidden',v!==view);document.getElementById(`nav-${v}`).classList.toggle('active',v===view)});if(view==='screentime')loadScreenTime();if(view==='applications')loadApplications()}
 
@@ -266,12 +266,76 @@ async function loadCatalogue(force=false){
       <td>${a.enabled?'<span class="online">Published</span>':'<span class="offline">Hidden</span>'}</td>
       <td><div class="catalogue-row-actions"><button class="secondary" onclick="openCatalogueEditor(${a.id})">Edit</button>${a.enabled?`<button class="warn" onclick="unpublishCatalogueItem(${a.id})">Unpublish</button>`:''}</div></td>
     </tr>`).join('')}</tbody></table>`:'<div class="app-empty">Nothing published yet. Add your first NAS installer.</div>';
+    const installs=(data.installations||[]).slice(0,35).map(x=>`<div class="command-row"><span>Package #${x.catalogue_id} · ${esc(x.device_id.substring(0,8))}<div class="meta">${esc(x.executable_path||x.installed_path||'')}</div></span><b>${esc(x.status)}</b></div>`).join('');
     const audit=document.getElementById('catalogueAttempts');
-    audit.innerHTML=data.attempts.length?data.attempts.slice(0,25).map(a=>`<div class="command-row"><span>#${a.catalogue_id} · ${esc(a.device_id.substring(0,8))} · ${esc(a.detail)}</span><span class="${a.status==='started'?'online':'error'}">${esc(a.status)}</span></div>`).join(''):'<p class="muted">No install attempts yet.</p>';
+    audit.innerHTML=installs+'<h4>Recent launch attempts</h4>'+(data.attempts.length?data.attempts.slice(0,25).map(a=>`<div class="command-row"><span>#${a.catalogue_id} · ${esc(a.device_id.substring(0,8))} · ${esc(a.detail)}</span><span class="${a.status==='started'?'online':'error'}">${esc(a.status)}</span></div>`).join(''):'<p class="muted">No install attempts yet.</p>');
   }catch(e){container.textContent='Could not load household catalogue: '+e.message;}
 }
+let nasSelectedJob='';
+let nasBrowsePath='';
+async function loadNasSettings(){
+  try{const n=await api('/api/nas/config');
+    document.getElementById('nasShare').value=n.root_unc||'';
+    document.getElementById('nasUser').value=n.username||'';
+    document.getElementById('gameScanRoots').value=n.game_scan_roots||'C:\\Games;D:\\Games';
+    document.getElementById('nasFeedback').textContent=n.root_unc?'Configured '+n.root_unc+(n.has_password?' · Credentials saved':' · No password stored'): 'Configure your SMB share above';
+  }catch(e){document.getElementById('nasFeedback').textContent=e.message}
+}
+async function saveNasSettings(e){
+  e.preventDefault(); const f=document.getElementById('nasFeedback');f.textContent='Connecting…';
+  try{
+    const n=await api('/api/nas/config',{method:'PUT',body:JSON.stringify({root_unc:document.getElementById('nasShare').value,
+      username:document.getElementById('nasUser').value,password:document.getElementById('nasPassword').value,
+      game_scan_roots:document.getElementById('gameScanRoots').value})});
+    document.getElementById('nasPassword').value='';
+    const found=await api('/api/nas/browse?path=');
+    f.textContent=`Connected — ${found.entries.length} top-level entries found at ${n.root_unc}`;
+  }catch(error){f.textContent='NAS access failed: '+error.message}
+}
+async function browseNas(path=''){
+  const display=document.getElementById('nasBrowseLocation');const files=document.getElementById('nasFiles');
+  display.textContent='Opening NAS folder…'; files.replaceChildren();
+  try{
+    const data=await api('/api/nas/browse?path='+encodeURIComponent(path));
+    nasBrowsePath=data.path;
+    display.textContent=data.root+(data.path?'\\'+data.path:'');
+    if(data.path){const parent=data.path.includes('\\')?data.path.slice(0,data.path.lastIndexOf('\\')):'';
+      const b=document.createElement('button');b.type='button';b.className='secondary';b.textContent='⬆ Parent folder';b.onclick=()=>browseNas(parent);files.appendChild(b);}
+    for(const item of data.entries){
+      const b=document.createElement('button');b.type='button';b.className='secondary nas-file';
+      b.textContent=(item.is_dir?'📁 ':'📄 ')+item.name+(item.is_dir?'':' · '+(item.size/1048576).toFixed(1)+' MB');
+      if(item.is_dir)b.onclick=()=>browseNas(item.path);
+      else if(item.name.toLowerCase().endsWith('.exe')) b.onclick=()=>hashNasPackage(data.path,item.name);
+      else b.disabled=true;
+      files.appendChild(b);
+    }
+  }catch(e){display.textContent='Browse failed: '+e.message;}
+}
+async function hashNasPackage(folder,entrypoint){
+  const status=document.getElementById('nasHashStatus'), progress=document.getElementById('nasHashProgress');
+  nasSelectedJob=''; progress.classList.remove('hidden');progress.value=0;status.textContent='Scanning '+entrypoint+'…';
+  try{
+    const start=await api('/api/nas/scan',{method:'POST',body:JSON.stringify({folder,entrypoint})});
+    let complete=false;
+    while(!complete&&document.getElementById('catalogueEditor').open){
+      await new Promise(resolve=>setTimeout(resolve,900));
+      const j=await api('/api/nas/scans/'+start.job_id);
+      progress.value=j.total_bytes?Math.min(100,100*j.bytes_hashed/j.total_bytes):0;
+      status.textContent=j.status==='hashing'?`Hashing ${j.current_file||'files'} — ${progress.value.toFixed(1)}%`:
+        j.status==='failed'?'Package scan failed: '+j.error:'';
+      if(j.status==='failed')return;
+      if(j.status==='ready'){
+        nasSelectedJob=start.job_id;complete=true;progress.value=100;
+        status.textContent=`Verified ${j.manifest.file_count} files, ${(j.manifest.total_bytes/1073741824).toFixed(2)} GB · SHA-256 ${j.manifest.digest.slice(0,20)}…`;
+        document.getElementById('catalogueHash').value=j.manifest.digest;
+        document.getElementById('cataloguePath').value='';
+        if(!document.getElementById('catalogueName').value.trim())document.getElementById('catalogueName').value=folder.split('\\').pop()||entrypoint;
+      }
+    }
+  }catch(e){status.textContent=e.message}
+}
 function openCatalogueEditor(id=null){
-  editingCatalogueId=id;
+  editingCatalogueId=id; nasSelectedJob='';
   const item=lastCatalogueData.items.find(x=>x.id===id);
   document.getElementById('catalogueEditorTitle').textContent=item?'Edit household app':'Publish to the family';
   document.getElementById('catalogueName').value=item?.name||'';
@@ -280,6 +344,10 @@ function openCatalogueEditor(id=null){
   document.getElementById('catalogueDescription').value=item?.description||'';
   document.getElementById('catalogueEnabled').checked=item?.enabled??true;
   document.getElementById('catalogueFeedback').textContent='';
+  document.getElementById('nasHashStatus').textContent=item?.manifest?`${item.file_count} package files already verified`:'Select setup.exe to hash the entire folder';
+  document.getElementById('nasHashProgress').classList.add('hidden');
+  document.getElementById('nasFiles').replaceChildren();
+  document.getElementById('nasBrowseLocation').textContent=item?.package_root||'Browse your configured NAS share';
   document.getElementById('catalogueEditor').showModal();
 }
 async function saveCatalogueItem(event){
@@ -290,20 +358,27 @@ async function saveCatalogueItem(event){
     const body={name:document.getElementById('catalogueName').value.trim(),
       installer_path:document.getElementById('cataloguePath').value.trim(),
       installer_sha256:document.getElementById('catalogueHash').value.trim(),
-      description:document.getElementById('catalogueDescription').value.trim(),
+      manifest_job_id:nasSelectedJob,description:document.getElementById('catalogueDescription').value.trim(),
       enabled:document.getElementById('catalogueEnabled').checked};
-    await api(editingCatalogueId?`/api/catalogue/${editingCatalogueId}`:'/api/catalogue',
+    if(!body.manifest_job_id&&(!body.installer_path||!body.installer_sha256))throw new Error('Browse the NAS and select setup.exe first');
+    const created=await api(editingCatalogueId?`/api/catalogue/${editingCatalogueId}`:'/api/catalogue',
       {method:editingCatalogueId?'PUT':'POST',body:JSON.stringify(body)});
+    const wasNew=!editingCatalogueId;
     document.getElementById('catalogueEditor').close();
     lastCatalogueSnapshot='';await loadCatalogue(true);
+    if(wasNew && created.installer_sha256){
+      openAppEditor(created.installer_sha256);
+      try{await searchAppArtwork()}catch{} // Artwork is optional if SteamGridDB isn't configured.
+    }
   }catch(e){error.textContent=e.message;}finally{btn.disabled=false;}
 }
+
 async function unpublishCatalogueItem(id){
   if(!confirm('Remove this installer from all HomeWatch launchers? Previous install history stays intact.'))return;
   try{await api(`/api/catalogue/${id}`,{method:'DELETE'});lastCatalogueSnapshot='';await loadCatalogue(true)}catch(e){alert(e.message)}
 }
 
-(async()=>{try{await refresh();loginPanel.classList.add('hidden');appPanel.classList.remove('hidden');showView(currentView);if(!refreshTimer)refreshTimer=setInterval(refresh,5000)}catch{}})();
+(async()=>{try{await refresh();loginPanel.classList.add('hidden');appPanel.classList.remove('hidden');showView(currentView);if(!refreshTimer)refreshTimer=setInterval(refresh,5000);await loadNasSettings()}catch{}})();
 
 // Centrally managed display names and SteamGridDB poster selection.
 let lastApplicationsData={requests:[],approvals:[]};

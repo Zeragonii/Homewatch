@@ -39,6 +39,16 @@
 <section id="view-applications" class="view hidden">
   <div class="page-title"><div><h2>Applications</h2><p class="muted">Review requests from your family's computers. Approvals unlock launching from the HomeWatch client.</p></div><button class="secondary" onclick="loadApplications(true)">Refresh requests</button></div>
   <div class="app-statline"><span><strong id="appPendingCount">0</strong> pending requests</span><span class="muted">Device · Child · Global approvals</span></div>
+  <section class="card"><div class="section-heading"><div><h3>NAS installer source</h3><p class="muted small">Configure a remote SMB share directly; no Docker mounts required.</p></div></div>
+    <form class="nas-config-form" onsubmit="saveNasSettings(event)">
+      <label>Share UNC path<input id="nasShare" required placeholder="\\192.168.1.250\installers"></label>
+      <label>Read-only NAS username<input id="nasUser" autocomplete="off" placeholder="homewatch-reader (optional)"></label>
+      <label>NAS password<input type="password" id="nasPassword" autocomplete="new-password" placeholder="Leave empty to keep saved password"></label>
+      <label>Game install folders (Windows; separate with ;)<input id="gameScanRoots" placeholder="C:\Games;D:\Games"></label>
+      <button type="submit" class="secondary">Save and test share</button>
+      <span id="nasFeedback" role="status" class="muted small"></span>
+    </form>
+  </section>
   <section class="card"><div class="section-heading"><div><h3>Household software library</h3><p class="muted small">Share installers with every enrolled PC. Installers run with normal Windows permissions.</p></div><button onclick="openCatalogueEditor()">+ Publish an app</button></div>
     <div id="catalogueItems" class="app-empty">Loading catalogue…</div>
     <details class="history"><summary>Recent installation attempts</summary><div id="catalogueAttempts" class="small"></div></details>
@@ -52,11 +62,19 @@
   <div class="app-editor-head"><div><h3 id="catalogueEditorTitle">Publish to the family</h3><p class="muted small">Approved installers appear in everyone's HomeWatch Launcher.</p></div><button class="secondary" onclick="document.getElementById('catalogueEditor').close()">Close</button></div>
   <form id="catalogueForm" onsubmit="saveCatalogueItem(event)" class="catalogue-form">
     <label>Friendly name<input id="catalogueName" maxlength="120" required placeholder="e.g. Little Kitty, Big City"></label>
-    <label>Installer on NAS (UNC share or HTTP/S URL)<input id="cataloguePath" maxlength="2048" required placeholder="\\192.168.1.250\installers\game1\setup.exe"></label>
-    <label>Expected installer SHA-256<input id="catalogueHash" maxlength="64" minlength="64" pattern="[a-fA-F0-9]{64}" spellcheck="false" required placeholder="64-character SHA-256 hash"></label>
+    <div class="nas-browser">
+      <div class="row"><b>Choose package folder and setup EXE</b><button type="button" class="secondary" onclick="browseNas('')">Browse NAS</button></div>
+      <div class="muted small" id="nasBrowseLocation">No package selected</div>
+      <div id="nasFiles" class="nas-files"></div>
+      <div id="nasHashStatus" class="muted small" role="status"></div>
+      <progress id="nasHashProgress" class="hidden" max="100" value="0"></progress>
+    </div>
+    <details><summary class="muted small">Legacy manually entered installer (existing single-file packages only)</summary>
+    <label>Installer UNC/HTTP path<input id="cataloguePath" maxlength="2048" placeholder="\\192.168.1.250\installers\game\setup.exe"></label>
+    <label>Existing SHA-256<input id="catalogueHash" maxlength="64" placeholder="64-character SHA-256"></label></details>
     <label>Note for children (optional)<textarea id="catalogueDescription" maxlength="600" rows="2" placeholder="Install this before trying to play."></textarea></label>
     <label class="toggle"><input type="checkbox" id="catalogueEnabled" checked> Available to every enrolled device</label>
-    <p class="muted small">Find the hash using PowerShell: <code>Get-FileHash '\\192.168.1.250\installers\game1\setup.exe' -Algorithm SHA256</code>. A changed installer needs a new hash. HomeWatch does not grant administrator rights to installers.</p>
+    <p class="muted small">HomeWatch hashes every package file before publication. Windows clients stage and verify the entire package before running setup normally; administrator elevation is not included in v0.5.0.</p>
     <p id="catalogueFeedback" class="error small" role="status"></p>
     <div class="row" style="justify-content:flex-end"><button type="button" class="secondary" onclick="document.getElementById('catalogueEditor').close()">Cancel</button><button id="catalogueSaveButton" type="submit">Save entry</button></div>
   </form>

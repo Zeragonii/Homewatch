@@ -10,6 +10,11 @@ import urllib.request
 import urllib.parse
 import io
 import re
+import base64
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from cryptography.fernet import Fernet
+from . import nas_library
 from datetime import date, datetime, timedelta, timezone, time as dt_time
 from pathlib import Path, PureWindowsPath
 from typing import Optional
@@ -232,8 +237,36 @@ class HouseholdCatalogueItem(Base):
     installer_path: Mapped[str] = mapped_column(String(2048))
     installer_sha256: Mapped[str] = mapped_column(String(64), index=True)
     description: Mapped[str] = mapped_column(String(600), default="")
+    package_root: Mapped[str] = mapped_column(String(2048), default="", server_default=text("''"))
+    package_entrypoint: Mapped[str] = mapped_column(String(700), default="", server_default=text("''"))
+    manifest_json: Mapped[str] = mapped_column(Text, default="", server_default=text("''"))
+    total_bytes: Mapped[int] = mapped_column(BigInteger, default=0, server_default=text("0"))
+    file_count: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"))
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default=text("1"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+class NasLibrarySettings(Base):
+    __tablename__ = "nas_library_settings"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    root_unc: Mapped[str] = mapped_column(String(2048))
+    username: Mapped[str] = mapped_column(String(255), default="")
+    encrypted_password: Mapped[str] = mapped_column(Text, default="")
+    game_scan_roots: Mapped[str] = mapped_column(Text, default=r"C:\Games;D:\Games", server_default=text(r"'C:\Games;D:\Games'"))
+
+
+class HouseholdInstallation(Base):
+    __tablename__ = "household_installations"
+    __table_args__ = (UniqueConstraint("catalogue_id", "device_id", name="uq_household_install_device"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    catalogue_id: Mapped[int] = mapped_column(ForeignKey("household_catalogue.id"), index=True)
+    device_id: Mapped[str] = mapped_column(ForeignKey("devices.id"), index=True)
+    status: Mapped[str] = mapped_column(String(30), default="not_installed")
+    installed_path: Mapped[str] = mapped_column(Text, default="")
+    executable_path: Mapped[str] = mapped_column(Text, default="")
+    executable_sha256: Mapped[str] = mapped_column(String(64), default="")
+    request_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 
@@ -269,6 +302,19 @@ with engine.begin() as conn:
         conn.execute(text("ALTER TABLE devices ADD COLUMN update_status VARCHAR(600) NOT NULL DEFAULT ''"))
     # Older artwork rows can contain NULL even though current models expect an integer.
     # Keep existing names/artwork intact; normalize only the cache revision.
+    if inspect(conn).has_table("nas_library_settings"):
+        nas_cols = {c['name'] for c in inspect(conn).get_columns('nas_library_settings')}
+        if 'game_scan_roots' not in nas_cols:
+            conn.execute(text(r"ALTER TABLE nas_library_settings ADD COLUMN game_scan_roots TEXT NOT NULL DEFAULT 'C:\Games;D:\Games'"))
+    if inspect(conn).has_table("household_catalogue"):
+        catalog_columns = {c["name"] for c in inspect(conn).get_columns("household_catalogue")}
+        for col, ddl in {"package_root": "VARCHAR(2048) NOT NULL DEFAULT ''",
+                         "package_entrypoint": "VARCHAR(700) NOT NULL DEFAULT ''",
+                         "manifest_json": "TEXT NOT NULL DEFAULT ''",
+                         "total_bytes": "BIGINT NOT NULL DEFAULT 0",
+                         "file_count": "INTEGER NOT NULL DEFAULT 0"}.items():
+            if col not in catalog_columns:
+                conn.execute(text(f"ALTER TABLE household_catalogue ADD COLUMN {col} {ddl}"))
     if inspect(conn).has_table("application_presentations"):
         conn.execute(text("UPDATE application_presentations SET artwork_revision = 0 WHERE artwork_revision IS NULL"))
 
@@ -1161,8 +1207,9 @@ def revoke_application(approval_id: int, db: Session = Depends(db_session)):
 # fetched/executed by the server or privileged Windows updater service.
 class CatalogueBody(BaseModel):
     name: str
-    installer_path: str
-    installer_sha256: str
+    installer_path: str = ''
+    installer_sha256: str = ''
+    manifest_job_id: str = '' 
     description: str = ""
     enabled: bool = True
 
@@ -1218,13 +1265,56 @@ def validate_catalogue(body: CatalogueBody) -> dict:
                 installer_sha256=digest, description=desc, enabled=body.enabled)
 
 
-def catalogue_json(db: Session, item: HouseholdCatalogueItem, include_path: bool = True) -> dict:
+def catalogue_json(db: Session, item: HouseholdCatalogueItem, include_path: bool = True, device_id: str = '') -> dict:
     presentation = presentation_json(db, item.installer_sha256, item.name)
-    return dict(id=item.id, name=presentation['display_name'] if presentation['display_name'] else item.name,
+    settings = db.get(NasLibrarySettings, 1)
+    game_scan_roots = settings.game_scan_roots.split(';') if settings and settings.game_scan_roots else [r'C:\Games', r'D:\Games']
+    state = None
+    if device_id:
+        found = db.scalar(select(HouseholdInstallation).where(
+            HouseholdInstallation.device_id == device_id,
+            HouseholdInstallation.catalogue_id == item.id))
+        if found:
+            approved = False
+            if found.request_id:
+                req = db.get(ApplicationRequest, found.request_id)
+                approved = bool(req and request_json(req, db, db.get(Device, device_id))['status'] == 'approved')
+            state = dict(status=found.status, installed_path=found.installed_path,
+                         executable_path=found.executable_path, executable_sha256=found.executable_sha256,
+                         request_id=found.request_id, approved=approved)
+    manifest = json.loads(item.manifest_json) if item.manifest_json else None
+    return dict(id=item.id, name=presentation['display_name'] or item.name,
                 installer_path=item.installer_path if include_path else None,
                 installer_sha256=item.installer_sha256, description=item.description,
+                package_root=item.package_root, package_entrypoint=item.package_entrypoint,
+                manifest=manifest, total_bytes=item.total_bytes, file_count=item.file_count,
+                installation=state, game_scan_roots=game_scan_roots,
                 enabled=item.enabled, created_at=item.created_at.isoformat(),
-                updated_at=item.updated_at.isoformat(), **{k: v for k,v in presentation.items() if k != 'display_name'})
+                updated_at=item.updated_at.isoformat(),
+                **{k: v for k,v in presentation.items() if k != 'display_name'})
+
+
+def catalogue_input(body: CatalogueBody) -> dict:
+    if body.manifest_job_id:
+        with nas_job_lock:
+            job = nas_jobs.get(body.manifest_job_id)
+            if not job or job['status'] != 'ready':
+                raise HTTPException(400, 'Approved manifest scan is not available or complete')
+            result = job['manifest']
+            folder = job['folder']
+            share = job['share']
+        # Legacy catalogue digest field is now a whole-package fingerprint.
+        canon = CatalogueBody(name=body.name, description=body.description, enabled=body.enabled,
+            installer_sha256=result['digest'],
+            installer_path=nas_library.resolve(share, folder + ('\\' if folder else '') + result['entrypoint']))
+        info = validate_catalogue(canon)
+        info.update(package_root=nas_library.resolve(share, folder),
+                    package_entrypoint=result['entrypoint'],
+                    manifest_json=json.dumps(result, sort_keys=True, separators=(',', ':')),
+                    total_bytes=result['total_bytes'], file_count=result['file_count'])
+        return info
+    # Preserve v0.4.5 manual single-file records.
+    return validate_catalogue(body)
 
 
 @app.get('/api/catalogue', dependencies=[Depends(require_admin)])
@@ -1232,13 +1322,17 @@ def admin_catalogue(db: Session = Depends(db_session)):
     rows = db.scalars(select(HouseholdCatalogueItem).order_by(HouseholdCatalogueItem.id.desc())).all()
     audit = db.scalars(select(HouseholdInstallAttempt).order_by(HouseholdInstallAttempt.id.desc()).limit(50)).all()
     return {'items': [catalogue_json(db, row) for row in rows],
+            'installations': [dict(catalogue_id=x.catalogue_id, device_id=x.device_id, status=x.status,
+                                   installed_path=x.installed_path, executable_path=x.executable_path,
+                                   updated_at=x.updated_at.isoformat())
+                              for x in db.scalars(select(HouseholdInstallation).order_by(HouseholdInstallation.updated_at.desc()).limit(100)).all()],
             'attempts': [dict(id=a.id, catalogue_id=a.catalogue_id, device_id=a.device_id,
                               status=a.status, detail=a.detail, created_at=a.created_at.isoformat()) for a in audit]}
 
 
 @app.post('/api/catalogue', dependencies=[Depends(require_admin)])
 def add_catalogue_item(body: CatalogueBody, db: Session = Depends(db_session)):
-    info = validate_catalogue(body)
+    info = catalogue_input(body)
     row = HouseholdCatalogueItem(**info)
     db.add(row)
     # Reuse presentation and SteamGridDB artwork mechanism keyed by exact installer digest.
@@ -1253,7 +1347,9 @@ def add_catalogue_item(body: CatalogueBody, db: Session = Depends(db_session)):
 def edit_catalogue_item(catalogue_id: int, body: CatalogueBody, db: Session = Depends(db_session)):
     row = db.get(HouseholdCatalogueItem, catalogue_id)
     if not row: raise HTTPException(404, 'Catalogue entry not found')
-    info = validate_catalogue(body)
+    info = catalogue_input(body)
+    if not body.manifest_job_id and row.manifest_json and body.installer_path == row.installer_path and body.installer_sha256 == row.installer_sha256:
+        info.update(package_root=row.package_root, package_entrypoint=row.package_entrypoint, manifest_json=row.manifest_json, total_bytes=row.total_bytes, file_count=row.file_count)
     for key, value in info.items(): setattr(row, key, value)
     row.updated_at = datetime.now(timezone.utc)
     presentation = db.get(ApplicationPresentation, row.installer_sha256)
@@ -1280,14 +1376,14 @@ def remove_catalogue_item(catalogue_id: int, db: Session = Depends(db_session)):
 def agent_catalogue(device: Device = Depends(agent_auth), db: Session = Depends(db_session)):
     rows = db.scalars(select(HouseholdCatalogueItem).where(
         HouseholdCatalogueItem.enabled == True).order_by(HouseholdCatalogueItem.name)).all()
-    return {'items': [catalogue_json(db, row) for row in rows]}
+    return {'items': [catalogue_json(db, row, device_id=device.id) for row in rows]}
 
 
 @app.get('/agent/catalogue/{catalogue_id}')
 def agent_catalogue_item(catalogue_id: int, device: Device = Depends(agent_auth), db: Session = Depends(db_session)):
     row = db.get(HouseholdCatalogueItem, catalogue_id)
     if not row or not row.enabled: raise HTTPException(404, 'Package is no longer published')
-    return catalogue_json(db, row)
+    return catalogue_json(db, row, device_id=device.id)
 
 
 @app.post('/agent/catalogue/{catalogue_id}/attempts')
@@ -1306,6 +1402,172 @@ def agent_install_attempt(catalogue_id: int, body: InstallAttemptBody,
 # ------------------- Centrally managed launcher presentation v0.4.2 -------------------
 # This artwork feature is metadata only; it does not affect approval matching
 # or grant any privileges to the target EXE.
+
+# ------------------------ SMB NAS browser / package hashing v0.5.0 ------------------------
+# Passwords never appear in API responses or agent catalogue data. Rotate the
+# SESSION_SECRET only after re-entering the NAS password (it encrypts it at rest).
+_fernet = Fernet(base64.urlsafe_b64encode(hashlib.sha256((SESSION_SECRET + '/nas-v1').encode()).digest()))
+nas_jobs: dict[str, dict] = {}
+nas_job_lock = threading.Lock()
+nas_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix='nas-scan')
+
+
+class NasConfigBody(BaseModel):
+    root_unc: str
+    username: str = ''
+    password: str = ''
+    game_scan_roots: str = r'C:\Games;D:\Games'
+
+
+class NasScanBody(BaseModel):
+    folder: str
+    entrypoint: str
+
+
+def get_nas_settings(db: Session):
+    settings = db.get(NasLibrarySettings, 1)
+    if settings is None:
+        raise HTTPException(400, 'Set up the NAS share in Applications first')
+    try:
+        pwd = _fernet.decrypt(settings.encrypted_password.encode()).decode() if settings.encrypted_password else ''
+    except Exception:
+        raise HTTPException(500, 'NAS credentials could not be decrypted; re-enter them')
+    return settings.root_unc, settings.username, pwd
+
+
+@app.get('/api/nas/config', dependencies=[Depends(require_admin)])
+def get_nas_config(db: Session = Depends(db_session)):
+    row = db.get(NasLibrarySettings, 1)
+    return {'root_unc': row.root_unc if row else '', 'username': row.username if row else '',
+            'has_password': bool(row.encrypted_password) if row else False,
+            'game_scan_roots': row.game_scan_roots if row else r'C:\Games;D:\Games'}
+
+
+@app.put('/api/nas/config', dependencies=[Depends(require_admin)])
+def save_nas_config(body: NasConfigBody, db: Session = Depends(db_session)):
+    try: root = nas_library.validate_root(body.root_unc)
+    except ValueError as e: raise HTTPException(400, str(e))
+    if len(body.username) > 255 or len(body.password) > 500:
+        raise HTTPException(400, 'Credentials are too long')
+    row = db.get(NasLibrarySettings, 1)
+    if row is None:
+        row = NasLibrarySettings(id=1, root_unc=root)
+        db.add(row)
+    if root != row.root_unc:
+        # Changing the server root does not alter existing approved packages.
+        row.encrypted_password = ''
+    row.root_unc = root
+    roots = [v.strip() for v in body.game_scan_roots.split(';') if v.strip()]
+    if len(roots) > 12 or any(len(v) > 255 or not re.fullmatch(r'[A-Za-z]:\\[^:*?"<>|]*', v) or '..' in v.split('\\') for v in roots):
+        raise HTTPException(400, 'Game scan folders must be local Windows paths such as C:\\Games;D:\\Games')
+    row.game_scan_roots = ';'.join(roots)
+    row.username = body.username.strip()
+    if body.password:
+        row.encrypted_password = _fernet.encrypt(body.password.encode()).decode()
+    db.commit()
+    return {'root_unc': root, 'username': row.username, 'has_password': bool(row.encrypted_password),
+            'game_scan_roots': row.game_scan_roots}
+
+
+@app.get('/api/nas/browse', dependencies=[Depends(require_admin)])
+def browse_nas(path: str = '', db: Session = Depends(db_session)):
+    root, user, pwd = get_nas_settings(db)
+    try:
+        relative = nas_library.validate_relative(path)
+        return {'root': root, 'path': relative, 'entries': nas_library.list_directory(root, relative, user, pwd)}
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(502, f'Could not browse NAS share: {type(e).__name__}')
+
+
+def run_nas_scan(job_id, root, folder, entrypoint, username, pwd):
+    def progress(filename, done, total):
+        with nas_job_lock:
+            job = nas_jobs[job_id]
+            job['current_file'] = filename
+            job['bytes_hashed'] = done
+            job['total_bytes'] = total
+    try:
+        manifest = nas_library.scan_package(root, folder, entrypoint, username, pwd, progress)
+        with nas_job_lock:
+            nas_jobs[job_id].update(status='ready', manifest=manifest, bytes_hashed=manifest['total_bytes'],
+                                    total_bytes=manifest['total_bytes'], current_file='')
+    except Exception as e:
+        with nas_job_lock:
+            nas_jobs[job_id].update(status='failed', error=f'{type(e).__name__}: {e}'[:300])
+
+
+@app.post('/api/nas/scan', dependencies=[Depends(require_admin)])
+def start_nas_scan(body: NasScanBody, db: Session = Depends(db_session)):
+    root, username, pwd = get_nas_settings(db)
+    try:
+        folder = nas_library.validate_relative(body.folder)
+        entrypoint = nas_library.validate_relative(body.entrypoint, allow_empty=False)
+        if '\\' in entrypoint or not entrypoint.lower().endswith('.exe'):
+            raise ValueError('Select an EXE in the package folder')
+    except ValueError as e: raise HTTPException(400, str(e))
+    with nas_job_lock:
+        busy = sum(j['status'] == 'hashing' for j in nas_jobs.values())
+        if busy >= 2: raise HTTPException(429, 'Two NAS scans are already in progress')
+        # Short-lived in-memory jobs; one worker process recommended for v0.5.0.
+        if len(nas_jobs) > 100:
+            for k in list(nas_jobs)[:50]:
+                if nas_jobs[k]['status'] != 'hashing': nas_jobs.pop(k)
+        job_id = uuid.uuid4().hex
+        nas_jobs[job_id] = dict(status='hashing', share=root, folder=folder, entrypoint=entrypoint,
+                                bytes_hashed=0, total_bytes=0, current_file='', error='')
+    nas_pool.submit(run_nas_scan, job_id, root, folder, entrypoint, username, pwd)
+    return {'job_id': job_id}
+
+
+@app.get('/api/nas/scans/{job_id}', dependencies=[Depends(require_admin)])
+def get_nas_scan(job_id: str):
+    with nas_job_lock:
+        item = nas_jobs.get(job_id)
+        if not item: raise HTTPException(404, 'NAS scan not found; start another scan')
+        return {k: v for k, v in item.items() if k not in ('share',)}
+
+
+class InstallationBody(BaseModel):
+    status: str
+    installed_path: str = ''
+    executable_path: str = ''
+    executable_sha256: str = ''
+    request_id: Optional[int] = None
+
+
+@app.put('/agent/catalogue/{catalogue_id}/installation')
+def save_device_installation(catalogue_id: int, body: InstallationBody,
+                             device: Device = Depends(agent_auth), db: Session = Depends(db_session)):
+    item = db.get(HouseholdCatalogueItem, catalogue_id)
+    if not item: raise HTTPException(404, 'Unknown package')
+    if body.status not in ('copying', 'verifying', 'installing', 'detecting', 'awaiting_approval', 'installed', 'failed'):
+        raise HTTPException(400, 'Unknown installation state')
+    if (len(body.installed_path) > 2048 or len(body.executable_path) > 2048 or
+        len(body.executable_sha256) not in (0, 64)):
+        raise HTTPException(400, 'Invalid installed application')
+    if body.executable_sha256 and not re.fullmatch('[a-f0-9]{64}', body.executable_sha256):
+        raise HTTPException(400, 'Invalid executable hash')
+    if body.request_id:
+        req = db.get(ApplicationRequest, body.request_id)
+        if not req or req.device_id != device.id or req.sha256 != body.executable_sha256:
+            raise HTTPException(403, 'The application request does not belong to this device and executable')
+    row = db.scalar(select(HouseholdInstallation).where(HouseholdInstallation.catalogue_id == catalogue_id,
+                 HouseholdInstallation.device_id == device.id))
+    if row is None:
+        row = HouseholdInstallation(catalogue_id=catalogue_id, device_id=device.id)
+        db.add(row)
+    row.status = body.status
+    row.installed_path = body.installed_path
+    row.executable_path = body.executable_path
+    row.executable_sha256 = body.executable_sha256
+    row.request_id = body.request_id
+    row.updated_at = datetime.now(timezone.utc)
+    db.commit()
+    return {'ok': True}
+
+
 class PresentationBody(BaseModel):
     display_name: str
 

@@ -31,6 +31,7 @@ public sealed class AppPortalForm : Form
     private string previousSnapshot = "";
     private int? selectedId;
     private bool loading;
+    private bool installing;
 
     public AppPortalForm(string serverUrl, string deviceId, string token)
     {
@@ -116,7 +117,7 @@ public sealed class AppPortalForm : Form
 
     private async Task LoadAppsAsync(bool force = false)
     {
-        if (loading || IsDisposed) return;
+        if (loading || installing || IsDisposed) return;
         loading = true;
         try
         {
@@ -142,7 +143,12 @@ public sealed class AppPortalForm : Form
                             Sha256 = item.InstallerSha256,
                             DisplayName = item.Name, Description = item.Description,
                             ArtworkRevision = item.ArtworkRevision,
-                            Publisher = "HomeWatch family library", Status = "available"
+                            Publisher = "HomeWatch family library", Status = "available",
+                            PackageStatus = item.Installation?.Status ?? "not_installed",
+                            InstalledPath = item.Installation?.ExecutablePath ?? "",
+                            InstalledRequestId = item.Installation?.RequestId ?? 0,
+                            InstalledApproved = item.Installation?.Approved ?? false,
+                            PackageSize = item.TotalBytes
                         });
                     }
                 }
@@ -151,7 +157,11 @@ public sealed class AppPortalForm : Form
             var snapshot = JsonSerializer.Serialize(list);
             if (IsDisposed || (!force && previousSnapshot == snapshot)) return;
             previousSnapshot = snapshot;
-            apps = list.GroupBy(a => a.FilePath, StringComparer.OrdinalIgnoreCase).Select(g => g.First()).ToList();
+            var installedGamePaths = new HashSet<string>(list.Where(a => a.IsCatalogue && !string.IsNullOrEmpty(a.InstalledPath))
+                .Select(a => a.InstalledPath), StringComparer.OrdinalIgnoreCase);
+            // The game already appears as a household tile; don't duplicate its approval tile.
+            apps = list.Where(a => a.IsCatalogue || !installedGamePaths.Contains(a.FilePath))
+                .GroupBy(a => a.FilePath, StringComparer.OrdinalIgnoreCase).Select(g => g.First()).ToList();
             DisposePosterImages();
             posterGrid.SuspendLayout();
             try
@@ -192,8 +202,8 @@ public sealed class AppPortalForm : Form
         var name = new Label { Text = app.DisplayName, Location = new Point(9, 211), Size = new Size(157, 29),
             Font = new Font("Segoe UI Semibold", 10, FontStyle.Bold), AutoEllipsis = true, ForeColor = TextColor };
         tile.Controls.Add(name);
-        var status = new Label { Text = app.IsCatalogue ? "↓ Available to install" : approved ? "✓ Ready to play" : app.Status == "pending" ? "◷ Waiting for approval" : "Not available",
-            ForeColor = approved ? Green : app.IsCatalogue ? Accent : app.Status == "pending" ? Amber : Muted,
+        var status = new Label { Text = app.IsCatalogue ? (app.InstalledApproved ? "✓ Ready to play" : app.InstalledRequestId > 0 ? "◷ Awaiting approval" : app.PackageStatus == "installing" ? "Installing" : "↓ Available to install") : approved ? "✓ Ready to play" : app.Status == "pending" ? "◷ Waiting for approval" : "Not available",
+            ForeColor = approved || app.InstalledApproved ? Green : app.IsCatalogue ? Accent : app.Status == "pending" ? Amber : Muted,
             Location = new Point(9, 241), Size = new Size(157, 23), AutoEllipsis = true,
             Font = new Font("Segoe UI", 9) };
         tile.Controls.Add(status);
@@ -289,23 +299,26 @@ public sealed class AppPortalForm : Form
             content.Controls.Add(new Label { Text = app?.DisplayName ?? "Choose a game", ForeColor = TextColor,
                 Dock = DockStyle.Fill, AutoEllipsis = true,
                 Font = new Font("Segoe UI Semibold", 20, FontStyle.Bold) }, 0, 1);
-            var approved = app?.Status == "approved";
-            var statusText = app is null ? "Select a tile to see its details" : app.IsCatalogue ? "↓ In the family library" : approved ? "✓ Approved and ready" :
+            var approved = app?.Status == "approved" || app?.InstalledApproved == true;
+            var statusText = app is null ? "Select a tile to see its details" : app.IsCatalogue ? (app.InstalledApproved ? "✓ Installed — ready to play" : app.InstalledRequestId > 0 ? "◷ Installed — waiting for parent approval" : "↓ In the family library") : approved ? "✓ Approved and ready" :
                 app.Status == "pending" ? "◷ Waiting for parent approval" : "Not approved";
             content.Controls.Add(new Label { Text = statusText, ForeColor = approved ? Green : Amber, Dock = DockStyle.Fill,
                 Font = new Font("Segoe UI Semibold", 10, FontStyle.Bold) }, 0, 2);
             content.Controls.Add(new Label { Text = app is not null && !string.IsNullOrWhiteSpace(app.Publisher) ? $"Publisher: {app.Publisher}" : "Publisher unavailable",
                 ForeColor = Muted, AutoEllipsis = true, Dock = DockStyle.Fill }, 0, 3);
             content.Controls.Add(new Label { Text = app is null ? "A nice place to keep your favourite games!" :
-                app.IsCatalogue ? $"{app.Description}\n\nInstaller: {app.FileName}\nThis app is shared with all family devices.\nYou may need a parent to finish installation." :
+                app.IsCatalogue ? $"{app.Description}\n\nInstaller: {app.FileName}\nSize: {app.PackageSize / (1024.0 * 1024 * 1024):F2} GB\n" +
+                (string.IsNullOrEmpty(app.InstalledPath) ? "Available to everyone in your family." : $"Installed here: {app.InstalledPath}") :
                 $"File: {app.FileName}\n{app.FilePath}\n\nOnly applications approved by your parent can be opened here.",
                 ForeColor = Muted, Dock = DockStyle.Fill, AutoEllipsis = true }, 0, 4);
             var canUse = approved || app?.IsCatalogue == true;
-            var button = ButtonFor(app?.IsCatalogue == true ? "↓  INSTALL FROM FAMILY LIBRARY" : approved ? "▶  PLAY / OPEN" : "Unavailable",
+            var button = ButtonFor(app?.IsCatalogue == true ? app.InstalledApproved ? "▶  PLAY" : app.InstalledRequestId > 0 ? "WAITING FOR PARENT APPROVAL" : app.PackageStatus == "detecting" ? "LOCATE INSTALLED GAME" : "↓  INSTALL FROM FAMILY LIBRARY" : approved ? "▶  PLAY / OPEN" : "Unavailable",
                 canUse ? Accent : Color.FromArgb(63, 78, 100), 100, 50);
-            button.Dock = DockStyle.Fill; button.Enabled = canUse;
+            button.Dock = DockStyle.Fill; button.Enabled = canUse && !(app?.IsCatalogue == true && app.InstalledRequestId > 0 && !app.InstalledApproved);
             if (app != null)
-                button.Click += async (_, _) => { if (app.IsCatalogue) await InstallCatalogueAsync(app, button); else await LaunchAsync(app, button); };
+                button.Click += async (_, _) => { if (app.IsCatalogue && app.InstalledApproved) await LaunchInstalledAsync(app, button);
+                    else if (app.IsCatalogue && app.PackageStatus == "detecting") await ChooseInstalledAsync(app, button);
+                    else if (app.IsCatalogue) await InstallCatalogueAsync(app, button); else await LaunchAsync(app, button); };
             content.Controls.Add(button, 0, 5);
             detailPane.Controls.Add(content);
         }
@@ -335,9 +348,206 @@ public sealed class AppPortalForm : Form
         finally { if (!IsDisposed) button.Enabled = true; }
     }
 
+    private async Task InstallationStateAsync(int id, string status, string installed = "", string executable = "",
+        string digest = "", int? requestId = null)
+    {
+        using var response = await http.PutAsJsonAsync($"agent/catalogue/{id}/installation",
+            new { status, installed_path = installed, executable_path = executable,
+                executable_sha256 = digest, request_id = requestId });
+        await RequireSuccess(response);
+    }
+
+    private async Task LaunchInstalledAsync(PortalApplication app, Button button)
+    {
+        button.Enabled = false;
+        try
+        {
+            var candidate = await ApplicationCandidate.ScanAsync(app.InstalledPath);
+            using var response = await http.PostAsJsonAsync($"agent/applications/{app.InstalledRequestId}/verify", candidate);
+            await RequireSuccess(response);
+            using var process = Process.Start(new ProcessStartInfo(app.InstalledPath)
+                { UseShellExecute = true, WorkingDirectory = Path.GetDirectoryName(app.InstalledPath) ?? "" });
+            if (process is null) throw new IOException("Unable to start the installed game");
+            await ReportLaunchAsync(app.InstalledRequestId, "started", "Opened from HomeWatch family library");
+            footer.Text = "Have fun! 🎮";
+        }
+        catch (Exception e)
+        {
+            footer.Text = "Game launch was blocked: " + e.Message;
+            await ReportLaunchAsync(app.InstalledRequestId, "failed", e.Message);
+        }
+        finally { if (!IsDisposed) button.Enabled = true; }
+    }
+
+    private async Task ChooseInstalledAsync(PortalApplication app, Button button)
+    {
+        using var picker = new OpenFileDialog { Title = "Locate the installed game's executable", Filter = "Applications (*.exe)|*.exe", CheckFileExists = true };
+        if (picker.ShowDialog(this) != DialogResult.OK) return;
+        button.Enabled = false;
+        try
+        {
+            using var source = await http.GetAsync($"agent/catalogue/{app.CatalogueId}");
+            await RequireSuccess(source);
+            var current = await source.Content.ReadFromJsonAsync<PortalCatalogueItem>();
+            if (current is null || !current.Enabled) throw new IOException("This game is no longer published");
+            await RegisterInstalledGameAsync(current, picker.FileName);
+            footer.Text = "Game found — waiting for your parent's launch approval.";
+        }
+        catch (Exception e) { footer.Text = "Could not register the game: " + e.Message; }
+        finally { if (!IsDisposed) { button.Enabled = true; await LoadAppsAsync(force: true); } }
+    }
+
+    private async Task RegisterInstalledGameAsync(PortalCatalogueItem item, string selected)
+    {
+        // An existing game EXE must not point into HomeWatch's own installer cache.
+        var stageRoot = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "HomeWatch", "Packages");
+        if (Path.GetFullPath(selected).StartsWith(Path.GetFullPath(stageRoot) + Path.DirectorySeparatorChar,
+            StringComparison.OrdinalIgnoreCase))
+            throw new IOException("Choose the game executable, not a cached setup file");
+        var candidate = await ApplicationCandidate.ScanAsync(selected);
+        candidate.Reason = "Installed from household library: " + item.Name;
+        using var requested = await http.PostAsJsonAsync("agent/applications/requests", candidate);
+        await RequireSuccess(requested);
+        using var doc = JsonDocument.Parse(await requested.Content.ReadAsStringAsync());
+        var requestId = doc.RootElement.GetProperty("id").GetInt32();
+        await InstallationStateAsync(item.Id, "awaiting_approval", Path.GetDirectoryName(selected) ?? "",
+            selected, candidate.Sha256, requestId);
+    }
+
+    private async Task InstallCatalogueAsync(PortalApplication app, Button button)
+    {
+        // Retain v0.4.5 support for a package with only an EXE fingerprint.
+        PortalCatalogueItem item;
+        try
+        {
+            using var read = await http.GetAsync($"agent/catalogue/{app.CatalogueId}");
+            await RequireSuccess(read);
+            item = await read.Content.ReadFromJsonAsync<PortalCatalogueItem>()
+                ?? throw new IOException("Package no longer exists");
+        }
+        catch (Exception e) { footer.Text = "Unable to open the installer: " + e.Message; return; }
+        if (item.Manifest == null) { await InstallLegacyCatalogueAsync(app, button); return; }
+        if (MessageBox.Show(this, $"Install {app.DisplayName}?\n\n" +
+            $"Package size: {item.TotalBytes / (1024.0 * 1024 * 1024):F2} GB\n" +
+            "HomeWatch will copy and verify the complete NAS package. " +
+            "The installer may still request an administrator password.",
+            "Install game", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
+        installing = true;
+        button.Enabled = false;
+        string auditStatus = "failed", auditDetail = "";
+        using var cancel = new CancellationTokenSource();
+        using var progressDialog = new Form
+        {
+            Text = "Preparing " + app.DisplayName, Size = new Size(550, 160),
+            StartPosition = FormStartPosition.CenterParent, FormBorderStyle = FormBorderStyle.FixedDialog,
+            MaximizeBox = false, MinimizeBox = false, ControlBox = false
+        };
+        var progressText = new Label { Dock = DockStyle.Top, Height = 52, Padding = new Padding(12),
+            Text = "Preparing approved installer…", AutoEllipsis = true };
+        var cancelButton = new Button { Dock = DockStyle.Bottom, Height = 36, Text = "Cancel download" };
+        cancelButton.Click += (_, _) => { cancel.Cancel(); cancelButton.Enabled = false; };
+        progressDialog.Controls.Add(progressText);
+        progressDialog.Controls.Add(cancelButton);
+        progressDialog.Show(this);
+        try
+        {
+            await InstallationStateAsync(item.Id, "copying");
+            var exe = await HouseholdPackageInstaller.InstallAsync(item, message =>
+            {
+                if (!progressDialog.IsDisposed) progressText.Text = message;
+                if (!IsDisposed) footer.Text = message;
+            }, cancel.Token);
+            progressDialog.Hide();
+            // Recheck publication immediately before executing the approved setup.
+            using (var latest = await http.GetAsync($"agent/catalogue/{item.Id}"))
+            {
+                await RequireSuccess(latest);
+                var fresh = await latest.Content.ReadFromJsonAsync<PortalCatalogueItem>();
+                if (fresh == null || !fresh.Enabled || fresh.InstallerSha256 != item.InstallerSha256)
+                    throw new IOException("Parent has changed or withdrawn this package");
+            }
+            await InstallationStateAsync(item.Id, "installing");
+            var before = HouseholdPackageInstaller.UninstallLocations();
+            footer.Text = "Installer open — follow the normal Windows setup wizard.";
+            using var process = Process.Start(new ProcessStartInfo(exe)
+            {
+                UseShellExecute = true, WorkingDirectory = Path.GetDirectoryName(exe) ?? ""
+            });
+            if (process is null) throw new IOException("Windows could not launch the installer");
+            auditStatus = "started"; auditDetail = "Interactive installer started as logged-in user";
+            await process.WaitForExitAsync();
+            if (process.ExitCode != 0)
+                throw new IOException("Installer exited with code " + process.ExitCode);
+            await InstallationStateAsync(item.Id, "detecting");
+            footer.Text = "Setup closed. Looking for the new game…";
+            var detected = HouseholdPackageInstaller.FindInstalledGames(before, item.Name, item.GameScanRoots);
+            string? selected = null;
+            if (detected.Count == 1 && File.Exists(detected[0]))
+            {
+                if (MessageBox.Show(this, $"Did this game install here?\n{detected[0]}",
+                    "Confirm game location", MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes)
+                    selected = detected[0];
+            }
+            if (selected is null)
+            {
+                using var picker = new OpenFileDialog
+                {
+                    Title = "Choose the installed game's EXE (not setup.exe)",
+                    Filter = "Applications (*.exe)|*.exe", CheckFileExists = true,
+                    InitialDirectory = detected.Count > 0 ? Path.GetDirectoryName(detected[0]) : null
+                };
+                if (picker.ShowDialog(this) == DialogResult.OK) selected = picker.FileName;
+            }
+            if (selected is null)
+            {
+                footer.Text = "Installer closed. Choose the game EXE later by installing again or asking your parent.";
+                auditStatus = "needs_selection"; auditDetail = "Game location not confirmed";
+                await InstallationStateAsync(item.Id, "detecting");
+                return;
+            }
+            await RegisterInstalledGameAsync(item, selected);
+            auditStatus = "completed"; auditDetail = "Game executable located; launch approval requested";
+            footer.Text = "Game installed! Your parent can now approve its Play button.";
+            if (MessageBox.Show(this, "Remove the copied installer files to free up disk space?\n\n" +
+                "The installed game will not be affected.", "Clean up installation files",
+                MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes)
+            {
+                try { Directory.Delete(Path.GetDirectoryName(exe)!, recursive: true); }
+                catch (Exception cleanupError) { footer.Text = "Installed; installer cache cleanup failed: " + cleanupError.Message; }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            footer.Text = "Package copy cancelled.";
+            auditStatus = "cancelled"; auditDetail = "Child cancelled the download";
+            await InstallationStateAsync(item.Id, "failed");
+        }
+        catch (Exception e)
+        {
+            footer.Text = "Installation issue: " + e.Message;
+            auditDetail = e.Message;
+            try { await InstallationStateAsync(item.Id, "failed"); } catch { }
+        }
+        finally
+        {
+            try
+            {
+                using var audit = await http.PostAsJsonAsync($"agent/catalogue/{item.Id}/attempts",
+                    new { status = auditStatus == "completed" ? "started" : auditStatus == "cancelled" ? "failed" : auditStatus == "needs_selection" ? "failed" : auditStatus,
+                          detail = auditDetail.Length > 250 ? auditDetail[..250] : auditDetail });
+                await RequireSuccess(audit);
+            }
+            catch { }
+            progressDialog.Hide();
+            installing = false;
+            if (!IsDisposed) { button.Enabled = true; await LoadAppsAsync(force: true); }
+        }
+    }
+
     // Installers always run as the current Windows user; the privileged service
     // NEVER receives arbitrary paths or executes downloaded packages.
-    private async Task InstallCatalogueAsync(PortalApplication app, Button button)
+    private async Task InstallLegacyCatalogueAsync(PortalApplication app, Button button)
     {
         if (app.CatalogueId <= 0 || !app.IsCatalogue) return;
         if (MessageBox.Show(this,
@@ -652,6 +862,34 @@ public sealed class PortalCatalogueItem
     [JsonPropertyName("description")] public string Description { get; set; } = "";
     [JsonPropertyName("enabled")] public bool Enabled { get; set; }
     [JsonPropertyName("artwork_revision")] public int ArtworkRevision { get; set; }
+    [JsonPropertyName("package_root")] public string PackageRoot { get; set; } = "";
+    [JsonPropertyName("package_entrypoint")] public string PackageEntrypoint { get; set; } = "";
+    [JsonPropertyName("manifest")] public PackageManifest? Manifest { get; set; }
+    [JsonPropertyName("total_bytes")] public long TotalBytes { get; set; }
+    [JsonPropertyName("game_scan_roots")] public List<string> GameScanRoots { get; set; } = new();
+    [JsonPropertyName("installation")] public PackageInstallation? Installation { get; set; }
+}
+
+public sealed class PackageInstallation
+{
+    [JsonPropertyName("status")] public string Status { get; set; } = "";
+    [JsonPropertyName("executable_path")] public string ExecutablePath { get; set; } = "";
+    [JsonPropertyName("request_id")] public int? RequestId { get; set; }
+    [JsonPropertyName("approved")] public bool Approved { get; set; }
+}
+
+public sealed class PackageManifest
+{
+    [JsonPropertyName("entrypoint")] public string Entrypoint { get; set; } = "";
+    [JsonPropertyName("total_bytes")] public long TotalBytes { get; set; }
+    [JsonPropertyName("files")] public List<PackageFile> Files { get; set; } = new();
+}
+
+public sealed class PackageFile
+{
+    [JsonPropertyName("path")] public string Path { get; set; } = "";
+    [JsonPropertyName("size")] public long Size { get; set; }
+    [JsonPropertyName("sha256")] public string Sha256 { get; set; } = "";
 }
 
 public sealed class PortalApplication
@@ -660,6 +898,11 @@ public sealed class PortalApplication
     public int CatalogueId { get; set; }
     public bool IsCatalogue { get; set; }
     public string Description { get; set; } = "";
+    public string PackageStatus { get; set; } = "";
+    public string InstalledPath { get; set; } = "";
+    public int InstalledRequestId { get; set; }
+    public bool InstalledApproved { get; set; }
+    public long PackageSize { get; set; }
     [JsonPropertyName("file_name")] public string FileName { get; set; } = "";
     [JsonPropertyName("file_path")] public string FilePath { get; set; } = "";
     [JsonPropertyName("status")] public string Status { get; set; } = "";
