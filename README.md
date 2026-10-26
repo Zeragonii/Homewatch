@@ -281,3 +281,7 @@ See [RELEASE-v0.5.2.md](RELEASE-v0.5.2.md). Parent-approved relative EXE paths c
 ### v0.5.3 — Local performance settings
 
 See [RELEASE-v0.5.3.md](RELEASE-v0.5.3.md) for the locally UAC-approved Defender exclusion add/remove window. It does not add remotely dispatched Defender commands or exclude HomeWatch application binaries.
+
+### v0.5.4 — Public signer distribution and pinned update verification
+
+See [RELEASE-v0.5.4.md](RELEASE-v0.5.4.md) for the **required rollout order**. Parents upload a public code-signing `.cer` to the HomeWatch web UI. An administrator must approve its SHA-256 fingerprint in the elevated Windows Performance settings on each machine. All subsequent updater binaries must have a valid Authenticode signature from that locally approved certificate. Tagged releases require signing secrets and verified signed artifacts.

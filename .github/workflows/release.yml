@@ -42,7 +42,7 @@ jobs:
           if ($env:GITHUB_REF -like 'refs/tags/v*') {
             $version = $env:GITHUB_REF_NAME.Substring(1)
           } else {
-            $version = '0.5.3'
+            $version = '0.5.4'
           }
           "HOMEWATCH_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           Write-Host "Building HomeWatch Agent $version"
@@ -94,7 +94,10 @@ jobs:
           SIGNING_PFX_PASSWORD: ${{ secrets.HOMEWATCH_SIGNING_PFX_PASSWORD }}
         run: |
           if ([string]::IsNullOrEmpty($env:SIGNING_PFX_BASE64) -and [string]::IsNullOrEmpty($env:SIGNING_PFX_PASSWORD)) {
-            Write-Warning 'Unsigned build: configure HOMEWATCH_SIGNING_PFX_BASE64 and HOMEWATCH_SIGNING_PFX_PASSWORD to sign releases. Do not turn off Windows security protections.'
+            if ($env:GITHUB_REF -like 'refs/tags/v*') {
+              throw 'Tagged HomeWatch releases MUST be signed: add HOMEWATCH_SIGNING_PFX_BASE64 and HOMEWATCH_SIGNING_PFX_PASSWORD.'
+            }
+            Write-Warning 'Unsigned main-branch CI build: GitHub release tags will require signing secrets.'
             exit 0
           }
           if ([string]::IsNullOrEmpty($env:SIGNING_PFX_BASE64) -or [string]::IsNullOrEmpty($env:SIGNING_PFX_PASSWORD)) { throw 'Both signing secrets are required' }
@@ -108,6 +111,23 @@ jobs:
               & $tool.FullName sign /fd SHA256 /f $certPath /p $env:SIGNING_PFX_PASSWORD /tr http://timestamp.digicert.com /td SHA256 $_
               if ($LASTEXITCODE -ne 0) { throw "Signing failed: $_" }
             }
+            # Trust this exact PUBLIC cert for the duration of the ephemeral Actions runner,
+            # so Authenticode verification can validate a self-signed publisher's chain.
+            $pfxCert = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($certPath, $env:SIGNING_PFX_PASSWORD)
+            $publicPath = Join-Path $env:RUNNER_TEMP 'homewatch-public.cer'
+            Export-Certificate -Cert $pfxCert -FilePath $publicPath -Force | Out-Null
+            Import-Certificate -FilePath $publicPath -CertStoreLocation 'Cert:\CurrentUser\Root' | Out-Null
+            Import-Certificate -FilePath $publicPath -CertStoreLocation 'Cert:\CurrentUser\TrustedPublisher' | Out-Null
+            $pin = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($pfxCert.RawData))
+            'out/agent/HomeWatchAgent.exe','out/agent/HomeWatchService.exe','out/agent/HomeWatchUpdater.exe' | ForEach-Object {
+              $check = Get-AuthenticodeSignature $_
+              if ($check.Status -ne 'Valid' -or -not $check.SignerCertificate) {
+                throw "Invalid Authenticode signature on $_ : $($check.Status)"
+              }
+              $actual = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($check.SignerCertificate.RawData))
+              if ($actual -ne $pin) { throw "Incorrect signing certificate on $_" }
+            }
+            "HOMEWATCH_SIGNER_SHA256=$pin" | Out-File -FilePath $env:GITHUB_ENV -Append
             "SIGNTOOL_PATH=$($tool.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
           } finally { Remove-Item $certPath -Force -ErrorAction SilentlyContinue }
 
@@ -153,6 +173,10 @@ jobs:
               [IO.File]::WriteAllBytes($certPath, [Convert]::FromBase64String($env:SIGNING_PFX_BASE64))
               & $env:SIGNTOOL_PATH sign /fd SHA256 /f $certPath /p $env:SIGNING_PFX_PASSWORD /tr http://timestamp.digicert.com /td SHA256 HomeWatch-Agent-Setup-win-x64.exe
               if ($LASTEXITCODE -ne 0) { throw 'Installer signing failed' }
+              $check = Get-AuthenticodeSignature HomeWatch-Agent-Setup-win-x64.exe
+              if ($check.Status -ne 'Valid' -or -not $check.SignerCertificate) { throw "Installer signature verification failed: $($check.Status)" }
+              $actual = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($check.SignerCertificate.RawData))
+              if ($actual -ne $env:HOMEWATCH_SIGNER_SHA256) { throw 'Installer publisher does not match the signed binaries' }
             } finally { Remove-Item $certPath -Force -ErrorAction SilentlyContinue }
           }
           (Get-FileHash HomeWatch-Agent-Setup-win-x64.exe -Algorithm SHA256).Hash.ToLower() | Out-File -Encoding ascii HomeWatch-Agent-Setup-win-x64.sha256

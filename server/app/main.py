@@ -16,6 +16,9 @@ import base64
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from cryptography.fernet import Fernet
+from cryptography import x509
+from cryptography.hazmat.primitives import serialization
+from cryptography.x509.oid import ExtendedKeyUsageOID
 from . import nas_library
 from datetime import date, datetime, timedelta, timezone, time as dt_time
 from pathlib import Path, PureWindowsPath
@@ -58,6 +61,17 @@ serializer = URLSafeSerializer(SESSION_SECRET, salt="homewatch-admin-session")
 class Base(DeclarativeBase):
     pass
 
+
+
+class SigningCertificate(Base):
+    __tablename__ = "signing_certificate"
+    # Only public DER certificate material, never a private key or PFX.
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    der_base64: Mapped[str] = mapped_column(Text, nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    subject: Mapped[str] = mapped_column(String(500), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 class Child(Base):
     __tablename__ = "children"
@@ -581,6 +595,87 @@ def logout():
     response.delete_cookie("hw_session")
     return response
 
+
+
+class SigningCertificateUpload(BaseModel):
+    certificate_base64: str
+
+
+def signing_certificate_metadata(record: SigningCertificate) -> dict:
+    return {"sha256": record.sha256, "subject": record.subject,
+            "expires_at": record.expires_at.isoformat(), "updated_at": record.updated_at.isoformat()}
+
+
+def check_public_signing_certificate(source: bytes) -> tuple[bytes, x509.Certificate]:
+    if len(source) > 16384 or len(source) < 100:
+        raise HTTPException(400, "Expected a public .cer certificate of at most 16 KiB")
+    try:
+        cert = (x509.load_pem_x509_certificate(source) if b"-----BEGIN CERTIFICATE-----" in source
+                else x509.load_der_x509_certificate(source))
+        der = cert.public_bytes(serialization.Encoding.DER)
+        # Only self-signed leaf code-signing certificates for this household setup.
+        if cert.issuer != cert.subject:
+            raise ValueError("Certificate must be self-signed")
+        cert.verify_directly_issued_by(cert)
+        if cert.not_valid_before_utc > datetime.now(timezone.utc) or cert.not_valid_after_utc <= datetime.now(timezone.utc):
+            raise ValueError("Certificate is not currently valid")
+        eku = cert.extensions.get_extension_for_class(x509.ExtendedKeyUsage).value
+        if ExtendedKeyUsageOID.CODE_SIGNING not in eku:
+            raise ValueError("Certificate does not allow code signing")
+        try:
+            if cert.extensions.get_extension_for_class(x509.BasicConstraints).value.ca:
+                raise ValueError("CA certificates cannot be uploaded")
+        except x509.ExtensionNotFound:
+            pass
+    except (ValueError, TypeError, x509.ExtensionNotFound) as exc:
+        raise HTTPException(400, "Invalid public code-signing certificate: " + str(exc)) from exc
+    return der, cert
+
+
+@app.get("/api/signing-certificate", dependencies=[Depends(require_admin)])
+def admin_get_signing_certificate(db: Session = Depends(db_session)):
+    record = db.get(SigningCertificate, 1)
+    return {"configured": bool(record), **(signing_certificate_metadata(record) if record else {})}
+
+
+@app.put("/api/signing-certificate", dependencies=[Depends(require_admin)])
+def admin_put_signing_certificate(body: SigningCertificateUpload, db: Session = Depends(db_session)):
+    if len(body.certificate_base64) > 23000:
+        raise HTTPException(400, "Certificate is too large")
+    try:
+        data = base64.b64decode(body.certificate_base64, validate=True)
+    except ValueError as exc:
+        raise HTTPException(400, "Certificate encoding is invalid") from exc
+    der, cert = check_public_signing_certificate(data)
+    sha = hashlib.sha256(der).hexdigest().upper()
+    record = db.get(SigningCertificate, 1)
+    if record is None:
+        record = SigningCertificate(id=1)
+        db.add(record)
+    record.der_base64 = base64.b64encode(der).decode('ascii')
+    record.sha256 = sha
+    record.subject = cert.subject.rfc4514_string()[:500]
+    record.expires_at = cert.not_valid_after_utc
+    record.updated_at = datetime.now(timezone.utc)
+    db.commit()
+    return {"configured": True, **signing_certificate_metadata(record)}
+
+
+@app.delete("/api/signing-certificate", dependencies=[Depends(require_admin)])
+def admin_delete_signing_certificate(db: Session = Depends(db_session)):
+    record = db.get(SigningCertificate, 1)
+    if record:
+        db.delete(record)
+        db.commit()
+    return {"ok": True}
+
+
+@app.get("/agent/signing-certificate")
+def agent_get_signing_certificate(_device: Device = Depends(agent_auth), db: Session = Depends(db_session)):
+    record = db.get(SigningCertificate, 1)
+    if record is None:
+        raise HTTPException(404, "No HomeWatch public signing certificate has been uploaded")
+    return {"certificate_base64": record.der_base64, **signing_certificate_metadata(record)}
 
 @app.get("/api/dashboard", dependencies=[Depends(require_admin)])
 def dashboard(db: Session = Depends(db_session)):

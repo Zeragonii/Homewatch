@@ -162,6 +162,9 @@ internal sealed class DefenderSetupForm : Form
         remove.Click += async (_, _) => await Apply("Remove");
         actions.Controls.Add(add);
         actions.Controls.Add(remove);
+        var signing = new Button { Text = "Signing certificate...", Width = 180, Height = 34 };
+        signing.Click += (_, _) => { using var dialog = new SigningCertificateForm(); dialog.ShowDialog(this); };
+        actions.Controls.Add(signing);
         var close = new Button { Text = "Close", Width = 95, Height = 34 };
         close.Click += (_, _) => Close();
         actions.Controls.Add(close);

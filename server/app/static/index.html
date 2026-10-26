@@ -56,6 +56,18 @@
       <div id="catalogueLaunchHints" class="small"></div></details>
     <details class="history"><summary>Recent installation attempts</summary><div id="catalogueAttempts" class="small"></div></details>
   </section>
+  <section class="card" id="signingCertificatePanel">
+    <div class="section-heading"><div><h3>HomeWatch signing certificate</h3><p class="muted small">Upload the PUBLIC .cer certificate only (never your .pfx or private key). Each Windows PC must approve this certificate locally in elevated Performance settings.</p></div></div>
+    <div class="row">
+      <input id="signingCertFile" type="file" accept=".cer,.crt,.pem,application/pkix-cert" aria-label="Public certificate file">
+      <button type="button" onclick="uploadSigningCertificate()">Upload public certificate</button>
+      <button type="button" class="secondary" onclick="loadSigningCertificate()">Refresh</button>
+      <button type="button" class="secondary" onclick="deleteSigningCertificate()">Remove from server</button>
+    </div>
+    <p id="signingCertSummary" class="muted small" role="status">No certificate checked yet.</p>
+    <div class="row"><code class="fingerprint" id="signingCertFingerprint">—</code><button type="button" class="secondary" onclick="copySigningFingerprint()">Copy SHA-256 fingerprint</button></div>
+    <p class="muted small">To activate trust on a PC: HomeWatch Launcher → Performance settings (administrator) → Signing certificate → download, compare this fingerprint, then install. Removing a certificate here does not revoke certificates already installed on Windows PCs.</p>
+  </section>
   <section class="card"><div class="section-heading"><h3>Needs approval</h3><small class="muted">Review the file fingerprint and reported signature before allowing it</small></div><div id="appRequests"></div></section>
   <section class="card"><div class="section-heading"><h3>Active approvals</h3><small class="muted">Revoke access at any time</small></div><div id="appApprovals"></div></section>
   <section class="card"><details><summary><b>Request and launch history</b></summary><div id="appHistory"></div></details></section>

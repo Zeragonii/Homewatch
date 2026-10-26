@@ -76,7 +76,7 @@ internal sealed class ReleaseWorker(ILogger<ReleaseWorker> log) : BackgroundServ
     private static HttpClient CreateHttp()
     {
         var h = new HttpClient { Timeout = TimeSpan.FromMinutes(5) };
-        h.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue("HomeWatch", "0.5.3"));
+        h.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue("HomeWatch", "0.5.4"));
         h.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/vnd.github+json"));
         return h;
     }
@@ -186,6 +186,10 @@ internal sealed class ReleaseWorker(ILogger<ReleaseWorker> log) : BackgroundServ
             }
             if (names.Count != Settings.Allowed.Length)
                 throw new InvalidDataException("Missing required update binaries");
+            // Fail closed: the server's uploaded certificate is never an authority to change this pin.
+            // Windows Authenticode chain/digest must be valid and every binary must have the SAME
+            // locally-admin-approved public certificate before the helper can run.
+            SignaturePolicy.VerifyAll(stage);
             // The currently installed SYSTEM service is copied to a protected helper
             // so it can stop/replace its own executable without a file lock.
             var helper = Path.Combine(Settings.State, "apply-helper-" + Guid.NewGuid().ToString("N") + ".exe");
@@ -228,6 +232,8 @@ internal static class ApplyUpdate
             !Version.TryParse(targetVersion, out _)) return;
         var dir = Path.Combine(Settings.State, stageName);
         if (!Directory.Exists(dir) || Settings.Allowed.Any(x => !File.Exists(Path.Combine(dir, x)))) return;
+        // Verify once more in the independent apply process immediately before replacement.
+        SignaturePolicy.VerifyAll(dir);
         var backup = Path.Combine(Settings.State, "backup-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(backup);
         try

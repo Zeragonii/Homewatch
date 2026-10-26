@@ -24,7 +24,7 @@ async function login(){try{await api('/api/login',{method:'POST',body:JSON.strin
 async function logout(){await fetch('/api/logout',{method:'POST'});location.reload()}
 async function showApp(){loginPanel.classList.add('hidden');appPanel.classList.remove('hidden');await refresh();if(!refreshTimer)refreshTimer=setInterval(refresh,5000);await loadNasSettings()}
 
-function showView(view){currentView=view;['dashboard','screentime','applications','onboarding'].forEach(v=>{document.getElementById(`view-${v}`).classList.toggle('hidden',v!==view);document.getElementById(`nav-${v}`).classList.toggle('active',v===view)});if(view==='screentime')loadScreenTime();if(view==='applications')loadApplications()}
+function showView(view){currentView=view;['dashboard','screentime','applications','onboarding'].forEach(v=>{document.getElementById(`view-${v}`).classList.toggle('hidden',v!==view);document.getElementById(`nav-${v}`).classList.toggle('active',v===view)});if(view==='screentime')loadScreenTime();if(view==='applications'){loadApplications();loadSigningCertificate()}}
 
 async function refresh(){try{const next=await api('/api/dashboard');state=next;renderSummary();renderChildren();renderPending();patchDevices();lastRefresh.textContent=`Updated ${new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'})}`;if(currentView==='screentime')loadScreenTime();if(currentView==='applications')loadApplications();}catch(e){if(e.message==='AUTH'){appPanel.classList.add('hidden');loginPanel.classList.remove('hidden');if(refreshTimer){clearInterval(refreshTimer);refreshTimer=null}}}}
 
@@ -466,4 +466,37 @@ async function chooseArtwork(artworkId){
     editorMessage('Poster saved centrally. Windows clients will fetch the new revision once.');
     lastApplicationSnapshot='';await loadApplications(true);
   }catch(e){editorMessage(e.message)}
+}
+
+
+// Only public self-signed, code-signing .cer data is uploaded; the private key stays offline.
+let signingCertMetadata=null;
+async function loadSigningCertificate(){
+  const summary=document.getElementById('signingCertSummary');
+  try{
+    const data=await api('/api/signing-certificate');signingCertMetadata=data;
+    summary.textContent=data.configured?`${data.subject} · Expires ${new Date(data.expires_at).toLocaleDateString()}`:'No public signing certificate uploaded';
+    document.getElementById('signingCertFingerprint').textContent=data.sha256||'—';
+  }catch(e){summary.textContent='Certificate status: '+e.message;}
+}
+async function uploadSigningCertificate(){
+  const f=document.getElementById('signingCertFile').files[0],summary=document.getElementById('signingCertSummary');
+  if(!f){summary.textContent='Choose your public .cer certificate first.';return;}
+  if(f.size>16384){summary.textContent='Certificate must be 16 KiB or smaller.';return;}
+  try{
+    const bytes=new Uint8Array(await f.arrayBuffer());
+    let binary='';for(const b of bytes)binary+=String.fromCharCode(b);
+    const data=await api('/api/signing-certificate',{method:'PUT',body:JSON.stringify({certificate_base64:btoa(binary)})});
+    await loadSigningCertificate();summary.textContent='Public certificate stored. SHA-256 fingerprint: '+data.sha256;
+  }catch(e){summary.textContent='Certificate rejected: '+e.message;}
+}
+async function deleteSigningCertificate(){
+  if(!confirm('Remove the public signing certificate from the server? Existing Windows trust is NOT removed.'))return;
+  try{await api('/api/signing-certificate',{method:'DELETE'});await loadSigningCertificate();}
+  catch(e){document.getElementById('signingCertSummary').textContent=e.message;}
+}
+async function copySigningFingerprint(){
+  if(!signingCertMetadata?.sha256)return;
+  try{await navigator.clipboard.writeText(signingCertMetadata.sha256);}
+  catch{prompt('Copy the SHA-256 fingerprint:',signingCertMetadata.sha256);}
 }
