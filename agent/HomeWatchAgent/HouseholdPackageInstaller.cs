@@ -125,6 +125,65 @@ internal static class HouseholdPackageInstaller
         return Convert.ToHexString(await SHA256.HashDataAsync(fs, token)).Equals(expected, StringComparison.OrdinalIgnoreCase);
     }
 
+    // Find installation *roots*, not the immediate folder containing a game EXE.
+    // A game may store the executable under several nested directories.
+    internal static List<string> FindInstallRoots(HashSet<string> previous, string title, List<string> gameFolders)
+    {
+        var roots = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var folder in UninstallLocations().Except(previous, StringComparer.OrdinalIgnoreCase))
+            if (Directory.Exists(folder)) roots.Add(Path.GetFullPath(folder).TrimEnd('\\'));
+        var name = NormalizeGameTitle(title);
+        if (name.Length < 3) return roots.ToList();
+        foreach (var configured in gameFolders.Take(12))
+        {
+            try
+            {
+                if (!Directory.Exists(configured)) continue;
+                foreach (var folder in Directory.EnumerateDirectories(configured).Take(200))
+                {
+                    var found = NormalizeGameTitle(Path.GetFileName(folder));
+                    if (found.Length < 3) continue;
+                    if (found.Contains(name, StringComparison.OrdinalIgnoreCase) ||
+                        name.Contains(found, StringComparison.OrdinalIgnoreCase))
+                        roots.Add(Path.GetFullPath(folder).TrimEnd('\\'));
+                }
+            }
+            catch { /* Missing drive or inaccessible folder: skip it. */ }
+        }
+        return roots.OrderBy(x => x.Length).ToList();
+    }
+
+    internal static string? InferInstallRoot(string exe, HashSet<string> previous, string title, List<string> gameFolders)
+    {
+        var path = Path.GetFullPath(exe);
+        return FindInstallRoots(previous, title, gameFolders).FirstOrDefault(root =>
+            path.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase));
+    }
+
+    internal static string? FindApprovedGameExecutable(HashSet<string> previous, string title,
+        List<string> gameFolders, string approvedRelative)
+    {
+        // The approved value came from the admin-reviewed catalogue but never
+        // allow it to escape a guessed local installation folder.
+        try { SafeRelative(approvedRelative); }
+        catch (IOException) { return null; }
+        if (!approvedRelative.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)) return null;
+        var matches = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var root in FindInstallRoots(previous, title, gameFolders))
+        {
+            try
+            {
+                var full = Path.GetFullPath(Path.Combine(root, approvedRelative));
+                if (!full.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) ||
+                    !File.Exists(full) || (File.GetAttributes(full) & FileAttributes.ReparsePoint) != 0) continue;
+                matches.Add(full);
+            }
+            catch { }
+        }
+        // Don't guess between multiple installations or versions.
+        return matches.Count == 1 ? matches.Single() : null;
+    }
+
     internal static List<string> FindInstalledGames(HashSet<string> previous, string title, List<string> gameFolders)
     {
         var list = new HashSet<string>(StringComparer.OrdinalIgnoreCase);

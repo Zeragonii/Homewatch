@@ -318,3 +318,97 @@ def test_artwork_can_be_selected_before_friendly_name(monkeypatch):
     assert second.json()['artwork_revision'] == 2
     assert client.get(f'/agent/applications/artwork/{digest}/2', headers=auth).status_code == 200
     assert client.get(f'/agent/applications/artwork/{digest}/1', headers=auth).status_code == 404
+
+
+def test_shared_relative_launch_path_requires_parent_approval():
+    """One client's deep game EXE is suggested, then approved for other PCs."""
+    from server.app.main import SessionLocal, HouseholdCatalogueItem
+    device_id, auth = _make_app_device()
+    catalogue = client.post('/api/catalogue', json={
+        'name': 'Minecraft Dungeons 2',
+        'installer_path': r'\\192.168.1.250\installers\minecraft\setup.exe',
+        'installer_sha256': '6' * 64, 'description': 'Game install', 'enabled': True
+    })
+    assert catalogue.status_code == 200, catalogue.text
+    cid = catalogue.json()['id']
+    deep_exe = r'D:\Games\Minecraft Dungeons 2\Content\Binaries\Win64\Game.exe'
+    candidate = _app_candidate('d', path=deep_exe)
+    candidate['file_name'] = 'Game.exe'
+    request = client.post('/agent/applications/requests', headers=auth, json=candidate)
+    assert request.status_code == 200, request.text
+    body = dict(status='awaiting_approval', installed_path=r'D:\Games\Minecraft Dungeons 2\Content\Binaries\Win64',
+                install_root=r'D:\Games\Minecraft Dungeons 2', executable_path=deep_exe,
+                executable_sha256=candidate['sha256'], request_id=request.json()['id'])
+    result = client.put(f'/agent/catalogue/{cid}/installation', headers=auth, json=body)
+    assert result.status_code == 200, result.text
+    assert client.get('/agent/catalogue', headers=auth).json()['items'][-1]['launch_relative_path'] == ''
+    suggestions = client.get('/api/catalogue').json()['launch_suggestions']
+    hint = next(a for a in suggestions if a['catalogue_id'] == cid)
+    assert hint['relative_path'] == r'Content\Binaries\Win64\Game.exe'
+    other, other_auth = _make_app_device()
+    assert client.post(f'/api/catalogue/{cid}/launch-hints/{hint["id"]}/review',
+                       json={'decision':'approve'}).status_code == 200
+    remote = client.get('/agent/catalogue', headers=other_auth)
+    shared = next(x for x in remote.json()['items'] if x['id'] == cid)
+    assert shared['launch_relative_path'] == r'Content\Binaries\Win64\Game.exe'
+    # No device-specific install or launch approval is inferred by path sharing.
+    assert shared['installation'] is None
+    assert client.delete(f'/api/catalogue/{cid}/launch-hint').status_code == 200
+    assert client.get(f'/agent/catalogue/{cid}', headers=auth).json()['launch_relative_path'] == ''
+
+
+def test_untrusted_device_cannot_poison_shared_launch_path():
+    device_id, auth = _make_app_device()
+    catalogue = client.post('/api/catalogue', json={
+        'name': 'Sandbox Game', 'installer_path': r'\\192.168.1.250\installers\sandbox\setup.exe',
+        'installer_sha256': '5' * 64, 'description': 'Test', 'enabled': True
+    })
+    assert catalogue.status_code == 200, catalogue.text
+    cid = catalogue.json()['id']
+    candidate = _app_candidate('e', path=r'C:\Games\Other\game.exe')
+    candidate['file_name'] = 'game.exe'
+    request = client.post('/agent/applications/requests', headers=auth, json=candidate)
+    assert request.status_code == 200, request.text
+    body = dict(status='awaiting_approval', installed_path=r'C:\Games\Sandbox',
+                install_root=r'C:\Games\Sandbox',
+                executable_path=r'C:\Games\Other\game.exe', executable_sha256='e'*64,
+                request_id=request.json()['id'])
+    response = client.put(f'/agent/catalogue/{cid}/installation', headers=auth, json=body)
+    assert response.status_code in (400,403), response.text
+    body['executable_path'] = r'C:\Games\Sandbox\..\Evil\game.exe'
+    response = client.put(f'/agent/catalogue/{cid}/installation', headers=auth, json=body)
+    assert response.status_code in (400,403), response.text
+
+
+def test_shared_launch_hint_version_must_match_current_installer():
+    from server.app.main import SessionLocal, HouseholdCatalogueItem, HouseholdLaunchSuggestion
+    device_id, auth = _make_app_device()
+    catalogue = client.post('/api/catalogue', json={
+        'name': 'Changing Game', 'installer_path': r'\\192.168.1.250\installers\changing\setup.exe',
+        'installer_sha256': '3'*64, 'description': 'Testing', 'enabled': True})
+    cid = catalogue.json()['id']
+    with SessionLocal() as db:
+        hint = HouseholdLaunchSuggestion(catalogue_id=cid, device_id=device_id,
+                  relative_path=r'Content\Game.exe', installer_sha256='4'*64,
+                  executable_sha256='7'*64)
+        db.add(hint); db.commit(); db.refresh(hint); hintid=hint.id
+    assert client.post(f'/api/catalogue/{cid}/launch-hints/{hintid}/review',
+                       json={'decision':'approve'}).status_code == 409
+
+
+def test_only_admin_can_set_manual_relative_launch_path():
+    device_id, auth = _make_app_device()
+    item = client.post('/api/catalogue', json={
+        'name': 'Deep Folder Game',
+        'installer_path': r'\\192.168.1.250\installers\deep\setup.exe',
+        'installer_sha256': 'b' * 64, 'description': '', 'enabled': True})
+    assert item.status_code == 200
+    cid = item.json()['id']
+    target = f'/api/catalogue/{cid}/launch-path'
+    good = r'Content\Binaries\Win64\DeepGame.exe'
+    assert client.put(target, json={'relative_path': good}).status_code == 200
+    assert client.get(f'/agent/catalogue/{cid}', headers=auth).json()['launch_relative_path'] == good
+    for bad in (r'..\cmd.exe', r'C:\Windows\system32\cmd.exe', r'\\server\share\cmd.exe', r'A/thing.exe', 'not-an-exe'):
+        response = client.put(target, json={'relative_path': bad})
+        assert response.status_code == 400, (bad, response.text)
+    assert client.get(f'/agent/catalogue/{cid}', headers=auth).json()['launch_relative_path'] == good

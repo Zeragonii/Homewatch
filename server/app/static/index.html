@@ -51,6 +51,9 @@
   </section>
   <section class="card"><div class="section-heading"><div><h3>Household software library</h3><p class="muted small">Share installers with every enrolled PC. Installers run with normal Windows permissions.</p></div><button onclick="openCatalogueEditor()">+ Publish an app</button></div>
     <div id="catalogueItems" class="app-empty">Loading catalogue…</div>
+    <details class="history" open><summary><b>Shared game launch paths — awaiting parent review</b></summary>
+      <p class="muted small">A client can propose a path to the installed game EXE. Only an approved relative path is reused on other devices. Each installed EXE still requires normal launch approval.</p>
+      <div id="catalogueLaunchHints" class="small"></div></details>
     <details class="history"><summary>Recent installation attempts</summary><div id="catalogueAttempts" class="small"></div></details>
   </section>
   <section class="card"><div class="section-heading"><h3>Needs approval</h3><small class="muted">Review the file fingerprint and reported signature before allowing it</small></div><div id="appRequests"></div></section>

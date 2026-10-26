@@ -271,3 +271,8 @@ HomeWatch now supports configuring the NAS share *inside the parent web UI*, wit
 ### v0.5.1 faster package transfers and optional Defender configuration
 
 See [RELEASE-v0.5.1.md](RELEASE-v0.5.1.md) for single-pass streaming SHA-256 transfer verification and the *one-time, locally administrator-approved* optional exclusion script. The HomeWatch agent and updater do not automatically change Defender settings.
+
+
+### v0.5.2 — Shared game launch paths
+
+See [RELEASE-v0.5.2.md](RELEASE-v0.5.2.md). Parent-approved relative EXE paths can be learned from an initial installation and reused automatically on later PCs. The existing application approval process is retained.

@@ -349,11 +349,11 @@ public sealed class AppPortalForm : Form
     }
 
     private async Task InstallationStateAsync(int id, string status, string installed = "", string executable = "",
-        string digest = "", int? requestId = null)
+        string digest = "", int? requestId = null, string installRoot = "")
     {
         using var response = await http.PutAsJsonAsync($"agent/catalogue/{id}/installation",
             new { status, installed_path = installed, executable_path = executable,
-                executable_sha256 = digest, request_id = requestId });
+                executable_sha256 = digest, request_id = requestId, install_root = installRoot });
         await RequireSuccess(response);
     }
 
@@ -397,7 +397,8 @@ public sealed class AppPortalForm : Form
         finally { if (!IsDisposed) { button.Enabled = true; await LoadAppsAsync(force: true); } }
     }
 
-    private async Task RegisterInstalledGameAsync(PortalCatalogueItem item, string selected)
+    private async Task RegisterInstalledGameAsync(PortalCatalogueItem item, string selected,
+        HashSet<string>? registryBefore = null)
     {
         // An existing game EXE must not point into HomeWatch's own installer cache.
         var stageRoot = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
@@ -411,8 +412,13 @@ public sealed class AppPortalForm : Form
         await RequireSuccess(requested);
         using var doc = JsonDocument.Parse(await requested.Content.ReadAsStringAsync());
         var requestId = doc.RootElement.GetProperty("id").GetInt32();
+        // Suggest a reusable relative path only when we know the game root.
+        // The parent approves it separately on the web dashboard.
+        var root = HouseholdPackageInstaller.InferInstallRoot(selected,
+            registryBefore ?? new HashSet<string>(StringComparer.OrdinalIgnoreCase),
+            item.Name, item.GameScanRoots);
         await InstallationStateAsync(item.Id, "awaiting_approval", Path.GetDirectoryName(selected) ?? "",
-            selected, candidate.Sha256, requestId);
+            selected, candidate.Sha256, requestId, root ?? "");
     }
 
     private async Task InstallCatalogueAsync(PortalApplication app, Button button)
@@ -489,9 +495,17 @@ public sealed class AppPortalForm : Form
                 throw new IOException("Installer exited with code " + process.ExitCode);
             await InstallationStateAsync(item.Id, "detecting");
             footer.Text = "Setup closed. Looking for the new game…";
-            var detected = HouseholdPackageInstaller.FindInstalledGames(before, item.Name, item.GameScanRoots);
-            string? selected = null;
-            if (detected.Count == 1 && File.Exists(detected[0]))
+            // A parent-reviewed path can locate games buried several folders deep.
+            // The local root may differ across PCs (C: vs D:, custom game folders).
+            string? selected = !string.IsNullOrWhiteSpace(item.LaunchRelativePath)
+                ? HouseholdPackageInstaller.FindApprovedGameExecutable(
+                    before, item.Name, item.GameScanRoots, item.LaunchRelativePath)
+                : null;
+            var detected = selected == null
+                ? HouseholdPackageInstaller.FindInstalledGames(before, item.Name, item.GameScanRoots)
+                : new List<string>();
+            if (selected != null) footer.Text = "Found your game using the family's approved launch location.";
+            if (selected == null && detected.Count == 1 && File.Exists(detected[0]))
             {
                 if (MessageBox.Show(this, $"Did this game install here?\n{detected[0]}",
                     "Confirm game location", MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes)
@@ -514,7 +528,7 @@ public sealed class AppPortalForm : Form
                 await InstallationStateAsync(item.Id, "detecting");
                 return;
             }
-            await RegisterInstalledGameAsync(item, selected);
+            await RegisterInstalledGameAsync(item, selected, before);
             auditStatus = "completed"; auditDetail = "Game executable located; launch approval requested";
             footer.Text = "Game installed! Your parent can now approve its Play button.";
             if (MessageBox.Show(this, "Remove the copied installer files to free up disk space?\n\n" +
@@ -884,6 +898,7 @@ public sealed class PortalCatalogueItem
     [JsonPropertyName("package_entrypoint")] public string PackageEntrypoint { get; set; } = "";
     [JsonPropertyName("manifest")] public PackageManifest? Manifest { get; set; }
     [JsonPropertyName("total_bytes")] public long TotalBytes { get; set; }
+    [JsonPropertyName("launch_relative_path")] public string LaunchRelativePath { get; set; } = "";
     [JsonPropertyName("game_scan_roots")] public List<string> GameScanRoots { get; set; } = new();
     [JsonPropertyName("installation")] public PackageInstallation? Installation { get; set; }
 }

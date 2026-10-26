@@ -2,8 +2,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 def test_version_and_update_archive_format():
-    assert '<Version>0.5.1</Version>' in (ROOT/'agent/HomeWatchAgent/HomeWatchAgent.csproj').read_text()
-    assert '$version = \'0.5.1\'' in (ROOT/'.github/workflows/release.yml').read_text()
+    assert '<Version>0.5.2</Version>' in (ROOT/'agent/HomeWatchAgent/HomeWatchAgent.csproj').read_text()
+    assert '$version = \'0.5.2\'' in (ROOT/'.github/workflows/release.yml').read_text()
     workflow = (ROOT/'.github/workflows/release.yml').read_text()
     for exe in ('HomeWatchAgent.exe','HomeWatchService.exe','HomeWatchUpdater.exe'):
         assert exe in workflow

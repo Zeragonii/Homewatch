@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import ntpath
+
 import hashlib
 import hmac
 import os
@@ -242,6 +244,8 @@ class HouseholdCatalogueItem(Base):
     manifest_json: Mapped[str] = mapped_column(Text, default="", server_default=text("''"))
     total_bytes: Mapped[int] = mapped_column(BigInteger, default=0, server_default=text("0"))
     file_count: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"))
+    # Parent-approved relative path; never an absolute device path.
+    launch_relative_path: Mapped[str] = mapped_column(String(700), default="", server_default=text("''"))
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default=text("true"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
@@ -268,6 +272,19 @@ class HouseholdInstallation(Base):
     executable_sha256: Mapped[str] = mapped_column(String(64), default="")
     request_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+class HouseholdLaunchSuggestion(Base):
+    """Untrusted device observations, reviewed by a parent before reuse."""
+    __tablename__ = "household_launch_suggestions"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    catalogue_id: Mapped[int] = mapped_column(ForeignKey("household_catalogue.id"), index=True)
+    device_id: Mapped[str] = mapped_column(ForeignKey("devices.id"), index=True)
+    relative_path: Mapped[str] = mapped_column(String(700))
+    installer_sha256: Mapped[str] = mapped_column(String(64))
+    executable_sha256: Mapped[str] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(20), default="pending")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 
 class HouseholdInstallAttempt(Base):
@@ -312,7 +329,8 @@ with engine.begin() as conn:
                          "package_entrypoint": "VARCHAR(700) NOT NULL DEFAULT ''",
                          "manifest_json": "TEXT NOT NULL DEFAULT ''",
                          "total_bytes": "BIGINT NOT NULL DEFAULT 0",
-                         "file_count": "INTEGER NOT NULL DEFAULT 0"}.items():
+                         "file_count": "INTEGER NOT NULL DEFAULT 0",
+                         "launch_relative_path": "VARCHAR(700) NOT NULL DEFAULT ''"}.items():
             if col not in catalog_columns:
                 conn.execute(text(f"ALTER TABLE household_catalogue ADD COLUMN {col} {ddl}"))
     if inspect(conn).has_table("application_presentations"):
@@ -1288,6 +1306,7 @@ def catalogue_json(db: Session, item: HouseholdCatalogueItem, include_path: bool
                 installer_sha256=item.installer_sha256, description=item.description,
                 package_root=item.package_root, package_entrypoint=item.package_entrypoint,
                 manifest=manifest, total_bytes=item.total_bytes, file_count=item.file_count,
+                launch_relative_path=item.launch_relative_path,
                 installation=state, game_scan_roots=game_scan_roots,
                 enabled=item.enabled, created_at=item.created_at.isoformat(),
                 updated_at=item.updated_at.isoformat(),
@@ -1321,7 +1340,14 @@ def catalogue_input(body: CatalogueBody) -> dict:
 def admin_catalogue(db: Session = Depends(db_session)):
     rows = db.scalars(select(HouseholdCatalogueItem).order_by(HouseholdCatalogueItem.id.desc())).all()
     audit = db.scalars(select(HouseholdInstallAttempt).order_by(HouseholdInstallAttempt.id.desc()).limit(50)).all()
+    suggestions = db.scalars(select(HouseholdLaunchSuggestion).where(
+        HouseholdLaunchSuggestion.status == 'pending').order_by(
+        HouseholdLaunchSuggestion.created_at.desc()).limit(80)).all()
     return {'items': [catalogue_json(db, row) for row in rows],
+            'launch_suggestions': [dict(id=x.id, catalogue_id=x.catalogue_id, device_id=x.device_id,
+                                        relative_path=x.relative_path, installer_sha256=x.installer_sha256,
+                                        executable_sha256=x.executable_sha256,
+                                        created_at=x.created_at.isoformat()) for x in suggestions],
             'installations': [dict(catalogue_id=x.catalogue_id, device_id=x.device_id, status=x.status,
                                    installed_path=x.installed_path, executable_path=x.executable_path,
                                    updated_at=x.updated_at.isoformat())
@@ -1350,6 +1376,8 @@ def edit_catalogue_item(catalogue_id: int, body: CatalogueBody, db: Session = De
     info = catalogue_input(body)
     if not body.manifest_job_id and row.manifest_json and body.installer_path == row.installer_path and body.installer_sha256 == row.installer_sha256:
         info.update(package_root=row.package_root, package_entrypoint=row.package_entrypoint, manifest_json=row.manifest_json, total_bytes=row.total_bytes, file_count=row.file_count)
+    if info["installer_sha256"] != row.installer_sha256:
+        row.launch_relative_path = ""  # A changed installer needs fresh review.
     for key, value in info.items(): setattr(row, key, value)
     row.updated_at = datetime.now(timezone.utc)
     presentation = db.get(ApplicationPresentation, row.installer_sha256)
@@ -1529,12 +1557,91 @@ def get_nas_scan(job_id: str):
         return {k: v for k, v in item.items() if k not in ('share',)}
 
 
+def valid_launch_relative_path(value: str) -> str:
+    """Strict Windows relative EXE inside game root (no drive, UNC or traversal)."""
+    if not value or len(value) > 700 or '/' in value or ':' in value or value.startswith('\\'):
+        raise HTTPException(400, 'Invalid relative executable path')
+    parts = value.split('\\')
+    if (any(not p or p in ('.', '..') or p.endswith((' ', '.')) or
+            any(ord(c) < 32 or c in '<>:"/\\|?*' for c in p) for p in parts) or
+            not parts[-1].lower().endswith('.exe')):
+        raise HTTPException(400, 'Invalid relative executable path')
+    return value
+
+
+def relative_from_install_root(install_root: str, exe_path: str) -> str:
+    if (len(install_root) > 2048 or len(exe_path) > 2048 or
+        not ntpath.isabs(install_root) or not ntpath.isabs(exe_path) or
+        install_root.startswith('\\\\') or exe_path.startswith('\\\\')):
+        raise HTTPException(400, 'Provide absolute local install and executable paths')
+    if not re.match(r'^[A-Za-z]:\\', install_root) or not re.match(r'^[A-Za-z]:\\', exe_path):
+        raise HTTPException(400, 'Use local Windows drive paths')
+    root = ntpath.normcase(ntpath.normpath(install_root))
+    exe = ntpath.normcase(ntpath.normpath(exe_path))
+    if not exe.startswith(root.rstrip('\\') + '\\'):
+        raise HTTPException(400, 'Executable must be inside the installation root')
+    relative = ntpath.relpath(ntpath.normpath(exe_path), ntpath.normpath(install_root))
+    return valid_launch_relative_path(relative)
+
+
+class LaunchHintDecision(BaseModel):
+    decision: str
+
+
+class LaunchPathBody(BaseModel):
+    relative_path: str
+
+
+@app.put('/api/catalogue/{catalogue_id}/launch-path', dependencies=[Depends(require_admin)])
+def set_launch_path(catalogue_id: int, body: LaunchPathBody, db: Session = Depends(db_session)):
+    item = db.get(HouseholdCatalogueItem, catalogue_id)
+    if not item: raise HTTPException(404, 'Package not found')
+    item.launch_relative_path = valid_launch_relative_path(body.relative_path)
+    item.updated_at = datetime.now(timezone.utc)
+    db.commit()
+    return {'ok': True, 'launch_relative_path': item.launch_relative_path}
+
+
+@app.post('/api/catalogue/{catalogue_id}/launch-hints/{hint_id}/review', dependencies=[Depends(require_admin)])
+def review_launch_hint(catalogue_id: int, hint_id: int, body: LaunchHintDecision, db: Session = Depends(db_session)):
+    if body.decision not in ('approve', 'reject'):
+        raise HTTPException(400, 'Select approve or reject')
+    item = db.get(HouseholdCatalogueItem, catalogue_id)
+    hint = db.get(HouseholdLaunchSuggestion, hint_id)
+    if not item or not hint or hint.catalogue_id != catalogue_id or hint.status != 'pending':
+        raise HTTPException(404, 'Launch suggestion not found')
+    # Check it still matches the current published package and device installation.
+    installed = db.scalar(select(HouseholdInstallation).where(
+        HouseholdInstallation.catalogue_id == catalogue_id,
+        HouseholdInstallation.device_id == hint.device_id))
+    if body.decision == 'approve':
+        if (not installed or installed.executable_sha256 != hint.executable_sha256 or
+            not installed.request_id or hint.installer_sha256 != item.installer_sha256):
+            raise HTTPException(409, 'Installation has changed since this suggestion')
+        item.launch_relative_path = valid_launch_relative_path(hint.relative_path)
+        item.updated_at = datetime.now(timezone.utc)
+    hint.status = 'approved' if body.decision == 'approve' else 'rejected'
+    db.commit()
+    return {'ok': True, 'launch_relative_path': item.launch_relative_path}
+
+
+@app.delete('/api/catalogue/{catalogue_id}/launch-hint', dependencies=[Depends(require_admin)])
+def clear_launch_hint(catalogue_id: int, db: Session = Depends(db_session)):
+    item = db.get(HouseholdCatalogueItem, catalogue_id)
+    if not item: raise HTTPException(404, 'Package not found')
+    item.launch_relative_path = ''
+    item.updated_at = datetime.now(timezone.utc)
+    db.commit()
+    return {'ok': True}
+
+
 class InstallationBody(BaseModel):
     status: str
     installed_path: str = ''
     executable_path: str = ''
     executable_sha256: str = ''
     request_id: Optional[int] = None
+    install_root: str = ''
 
 
 @app.put('/agent/catalogue/{catalogue_id}/installation')
@@ -1558,6 +1665,23 @@ def save_device_installation(catalogue_id: int, body: InstallationBody,
     if row is None:
         row = HouseholdInstallation(catalogue_id=catalogue_id, device_id=device.id)
         db.add(row)
+    # A device can suggest a path, never directly set the household-wide hint.
+    if body.status == 'awaiting_approval' and body.request_id and body.install_root:
+        relative = relative_from_install_root(body.install_root, body.executable_path)
+        if relative.casefold() != item.launch_relative_path.casefold():
+            existing = db.scalar(select(HouseholdLaunchSuggestion).where(
+                HouseholdLaunchSuggestion.catalogue_id == catalogue_id,
+                HouseholdLaunchSuggestion.device_id == device.id,
+                HouseholdLaunchSuggestion.status == 'pending'))
+            if existing is None:
+                existing = HouseholdLaunchSuggestion(catalogue_id=catalogue_id, device_id=device.id,
+                    relative_path=relative, installer_sha256=item.installer_sha256,
+                    executable_sha256=body.executable_sha256)
+                db.add(existing)
+            else:
+                existing.relative_path = relative
+                existing.installer_sha256 = item.installer_sha256
+                existing.executable_sha256 = body.executable_sha256
     row.status = body.status
     row.installed_path = body.installed_path
     row.executable_path = body.executable_path

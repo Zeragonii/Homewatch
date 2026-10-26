@@ -261,15 +261,38 @@ async function loadCatalogue(force=false){
     lastCatalogueSnapshot=snapshot;
     container.className='app-wrap';
     container.innerHTML=data.items.length?`<table class="app-table catalogue-table"><thead><tr><th>App</th><th>Installer</th><th>Visible</th><th>Actions</th></tr></thead><tbody>${data.items.map(a=>`<tr>
-      <td><b>${esc(a.name)}</b><button class="subtle-action" onclick="openAppEditor('${a.installer_sha256}')">Edit tile</button><div class="meta">${esc(a.description||'Available to the household')}</div></td>
+      <td><b>${esc(a.name)}</b><button class="subtle-action" onclick="openAppEditor('${a.installer_sha256}')">Edit tile</button><div class="meta">${esc(a.description||'Available to the household')}</div>
+      <div class="meta">${a.launch_relative_path ? 'Shared launch path: <code>'+esc(a.launch_relative_path)+'</code> <button class="subtle-action" onclick="clearCatalogueLaunchHint('+a.id+')">Clear</button>' : 'No approved shared launch path yet'} <button class="subtle-action" onclick="editCatalogueLaunchPath(${a.id})">Set path</button></div></td>
       <td class="catalogue-source"><div class="meta">${esc(a.installer_path)}</div><span class="fingerprint">SHA-256 ${esc(a.installer_sha256.substring(0,18))}…</span></td>
       <td>${a.enabled?'<span class="online">Published</span>':'<span class="offline">Hidden</span>'}</td>
       <td><div class="catalogue-row-actions"><button class="secondary" onclick="openCatalogueEditor(${a.id})">Edit</button>${a.enabled?`<button class="warn" onclick="unpublishCatalogueItem(${a.id})">Unpublish</button>`:''}</div></td>
     </tr>`).join('')}</tbody></table>`:'<div class="app-empty">Nothing published yet. Add your first NAS installer.</div>';
+    const pendingHints=(data.launch_suggestions||[]).map(h=>{
+      const app=data.items.find(x=>x.id===h.catalogue_id);
+      if(!app)return '';
+      return `<div class="command-row"><div><b>${esc(app.name)}</b> · Device ${esc(h.device_id.substring(0,8))}<div class="meta">Suggested launch path: <code>${esc(h.relative_path)}</code></div><div class="meta">EXE SHA-256 ${esc(h.executable_sha256.substring(0,18))}…</div></div><div class="catalogue-row-actions"><button class="accept" onclick="reviewCatalogueLaunchHint(${h.catalogue_id},${h.id},'approve')">Use for future installs</button><button class="secondary" onclick="reviewCatalogueLaunchHint(${h.catalogue_id},${h.id},'reject')">Reject</button></div></div>`;
+    }).join('');
+    document.getElementById('catalogueLaunchHints').innerHTML=pendingHints||'<p class="muted">No launch paths awaiting review.</p>';
     const installs=(data.installations||[]).slice(0,35).map(x=>`<div class="command-row"><span>Package #${x.catalogue_id} · ${esc(x.device_id.substring(0,8))}<div class="meta">${esc(x.executable_path||x.installed_path||'')}</div></span><b>${esc(x.status)}</b></div>`).join('');
     const audit=document.getElementById('catalogueAttempts');
     audit.innerHTML=installs+'<h4>Recent launch attempts</h4>'+(data.attempts.length?data.attempts.slice(0,25).map(a=>`<div class="command-row"><span>#${a.catalogue_id} · ${esc(a.device_id.substring(0,8))} · ${esc(a.detail)}</span><span class="${a.status==='started'?'online':'error'}">${esc(a.status)}</span></div>`).join(''):'<p class="muted">No install attempts yet.</p>');
   }catch(e){container.textContent='Could not load household catalogue: '+e.message;}
+}
+async function reviewCatalogueLaunchHint(catalogueId,hintId,decision){
+  try{await api(`/api/catalogue/${catalogueId}/launch-hints/${hintId}/review`,{method:'POST',body:JSON.stringify({decision})});
+    lastCatalogueSnapshot='';await loadCatalogue(true)}catch(e){alert(e.message)}
+}
+async function editCatalogueLaunchPath(catalogueId){
+  const item=lastCatalogueData.items.find(x=>x.id===catalogueId);if(!item)return;
+  const relative=prompt('Enter the game EXE path RELATIVE to the game installation folder (e.g. Content\\Binaries\\Win64\\Game.exe):',item.launch_relative_path||'');
+  if(relative===null)return;
+  try{await api(`/api/catalogue/${catalogueId}/launch-path`,{method:'PUT',body:JSON.stringify({relative_path:relative.trim()})});
+    lastCatalogueSnapshot='';await loadCatalogue(true)}catch(e){alert(e.message)}
+}
+async function clearCatalogueLaunchHint(catalogueId){
+  if(!confirm('Clear this household launch path? Existing installations will keep working.'))return;
+  try{await api(`/api/catalogue/${catalogueId}/launch-hint`,{method:'DELETE'});
+    lastCatalogueSnapshot='';await loadCatalogue(true)}catch(e){alert(e.message)}
 }
 let nasSelectedJob='';
 let nasBrowsePath='';
