@@ -504,12 +504,10 @@ public sealed class AgentContext : ApplicationContext
         lastUpdateCheck = DateTime.UtcNow;
         // The privileged service is the ONLY component authorized to install updates.
         // This marker is a trigger, not an executable, URL, release path, or command.
-        var installed = Path.Combine(AppContext.BaseDirectory, "HomeWatchService.exe");
-        if (!File.Exists(installed))
-        {
-            if (commandId.HasValue) await CompleteAsync(commandId.Value, "machine updater service binary missing");
-            return;
-        }
+        // The user-session agent only writes the fixed update-check marker.
+        // It needn't guess the service's configured executable path here; the
+        // service itself validates its installation path and reports a precise
+        // diagnostic through the protected status.json file.
         try
         {
             if (forceRefresh)
@@ -547,8 +545,9 @@ public sealed class AgentContext : ApplicationContext
     {
         try
         {
-            var path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
-                "HomeWatch", ".updates", "status.json");
+            // The tray process lives beside the registered Windows service. Resolve
+            // its update status without assuming native or x86 Program Files paths.
+            var path = Path.Combine(AppContext.BaseDirectory, ".updates", "status.json");
             if (!File.Exists(path)) return "Updater status unavailable";
             using var doc = JsonDocument.Parse(File.ReadAllText(path));
             var root = doc.RootElement;

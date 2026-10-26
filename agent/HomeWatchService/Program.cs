@@ -26,8 +26,23 @@ internal static class Settings
     public const string ServiceName = "HomeWatchUpdaterService";
     public const string Api = "https://api.github.com/repos/Zeragonii/Homewatch/releases/latest";
     public const string ReleasePrefix = "https://github.com/Zeragonii/Homewatch/releases/download/";
-    public static readonly string State = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "HomeWatch", ".updates");
-    public static readonly string InstallDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "HomeWatch");
+    // Resolve the actual service installation, not a guessed Program Files location.
+    // The temporary apply helper is copied into <install>\.updates, so for that
+    // process we must resolve its parent directory as the installation directory.
+    public static readonly string InstallDir = FindInstallDir();
+    public static readonly string State = Path.Combine(InstallDir, ".updates");
+    private static string FindInstallDir()
+    {
+        var executable = Environment.ProcessPath;
+        if (string.IsNullOrWhiteSpace(executable))
+            throw new IOException("Unable to determine HomeWatch updater executable path");
+        var directory = Path.GetDirectoryName(Path.GetFullPath(executable))
+            ?? throw new IOException("Unable to determine HomeWatch installation directory");
+        if (Path.GetFileName(directory).Equals(".updates", StringComparison.OrdinalIgnoreCase))
+            directory = Directory.GetParent(directory)?.FullName
+                ?? throw new IOException("Unable to resolve HomeWatch installation from update helper");
+        return directory;
+    }
     public static readonly string[] Allowed = { "HomeWatchAgent.exe", "HomeWatchUpdater.exe", "HomeWatchService.exe" };
     public const long MaxArchiveBytes = 350L * 1024 * 1024;
     public const long MaxEntryBytes = 200L * 1024 * 1024;
@@ -61,7 +76,7 @@ internal sealed class ReleaseWorker(ILogger<ReleaseWorker> log) : BackgroundServ
     private static HttpClient CreateHttp()
     {
         var h = new HttpClient { Timeout = TimeSpan.FromMinutes(5) };
-        h.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue("HomeWatch", "0.4.2"));
+        h.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue("HomeWatch", "0.4.3.1"));
         h.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/vnd.github+json"));
         return h;
     }
@@ -95,7 +110,7 @@ internal sealed class ReleaseWorker(ILogger<ReleaseWorker> log) : BackgroundServ
         }
     }
 
-    private static string CurrentVersion() => typeof(ReleaseWorker).Assembly.GetName().Version?.ToString(3) ?? "0.0.0";
+    private static string CurrentVersion() => typeof(ReleaseWorker).Assembly.GetName().Version?.ToString(4) ?? "0.0.0";
 
     private async Task CheckAsync(CancellationToken ct)
     {
@@ -174,7 +189,16 @@ internal sealed class ReleaseWorker(ILogger<ReleaseWorker> log) : BackgroundServ
             // The currently installed SYSTEM service is copied to a protected helper
             // so it can stop/replace its own executable without a file lock.
             var helper = Path.Combine(Settings.State, "apply-helper-" + Guid.NewGuid().ToString("N") + ".exe");
-            File.Copy(Path.Combine(Settings.InstallDir, "HomeWatchService.exe"), helper);
+            // Use the actual running service path; the installer may have been placed
+            // in a custom directory or by an older installer under Program Files (x86).
+            // Never accept a path outside the service's own protected install directory.
+            var currentExecutable = Environment.ProcessPath;
+            var expectedExecutable = Path.GetFullPath(Path.Combine(Settings.InstallDir, "HomeWatchService.exe"));
+            if (string.IsNullOrWhiteSpace(currentExecutable) || !File.Exists(currentExecutable))
+                throw new FileNotFoundException("The running HomeWatch service executable is missing. Run the latest HomeWatch installer as administrator to repair the service registration.", currentExecutable);
+            if (!Path.GetFullPath(currentExecutable).Equals(expectedExecutable, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException($"HomeWatch service is running from {currentExecutable}, but expected {expectedExecutable}. Run the latest HomeWatch installer as administrator to repair its service path.");
+            File.Copy(currentExecutable, helper);
             UpdateStatus.Write("installing", $"Applying {tag}", tag[1..]);
             using var updateProcess = Process.Start(new ProcessStartInfo(helper) {
                 ArgumentList = { "--apply", "--service-update", Path.GetFileName(stage), tag[1..] },

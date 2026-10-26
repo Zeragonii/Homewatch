@@ -1,3 +1,7 @@
+# HomeWatch v0.4.3 — Service repair and updater diagnostics
+
+See [RELEASE-v0.4.3.md](RELEASE-v0.4.3.md) for verification and recovery.
+
 # HomeWatch v0.4.2 — Poster-Grid My Apps Launcher
 
 See [RELEASE-v0.4.2.md](RELEASE-v0.4.2.md) for poster art configuration, Portainer storage, desktop UI changes, deployment and updater test steps.
@@ -237,3 +241,8 @@ long-term architecture.
 ## New in v0.4.0 — My Apps
 
 The child-facing **My Apps** portal can be opened by double-clicking the HomeWatch tray icon or right-clicking and choosing **My apps & requests**. If you run the v0.4 installer, it also adds a **HomeWatch My Apps** Start Menu shortcut. The portal lets children request executables, and the new **Applications** page in the web admin allows device, child or global approval. Fingerprints, signer information, revocation and launch history are included. See [RELEASE-v0.4.0.md](RELEASE-v0.4.0.md) for deployment and the important distinction between approved normal-user launch and Windows administrator elevation.
+
+
+### Native x64 installation patch (v0.4.3a)
+
+See `RELEASE-v0.4.3a.md` for the one-time migration procedure. Publish using numeric Git tag `v0.4.3.1` because the updater parses `System.Version`.
