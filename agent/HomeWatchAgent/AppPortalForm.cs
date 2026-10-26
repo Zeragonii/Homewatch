@@ -86,7 +86,14 @@ public sealed class AppPortalForm : Form
         root.Controls.Add(body, 0, 1);
         footer = new Label { Text = "Your library will show up here. ✨", Dock = DockStyle.Fill,
             TextAlign = ContentAlignment.MiddleLeft, ForeColor = Muted, AutoEllipsis = true };
-        root.Controls.Add(footer, 0, 2);
+        var footerRow = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, BackColor = Background };
+        footerRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        footerRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 185));
+        footerRow.Controls.Add(footer, 0, 0);
+        var performanceButton = ButtonFor("Performance settings", Surface, 179, 32);
+        performanceButton.Click += (_, _) => DefenderSetup.OpenWithUac();
+        footerRow.Controls.Add(performanceButton, 1, 0);
+        root.Controls.Add(footerRow, 0, 2);
         Controls.Add(root);
         ShowDetails(null);
 

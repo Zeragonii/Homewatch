@@ -276,3 +276,8 @@ See [RELEASE-v0.5.1.md](RELEASE-v0.5.1.md) for single-pass streaming SHA-256 tra
 ### v0.5.2 — Shared game launch paths
 
 See [RELEASE-v0.5.2.md](RELEASE-v0.5.2.md). Parent-approved relative EXE paths can be learned from an initial installation and reused automatically on later PCs. The existing application approval process is retained.
+
+
+### v0.5.3 — Local performance settings
+
+See [RELEASE-v0.5.3.md](RELEASE-v0.5.3.md) for the locally UAC-approved Defender exclusion add/remove window. It does not add remotely dispatched Defender commands or exclude HomeWatch application binaries.

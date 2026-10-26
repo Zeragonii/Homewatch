@@ -2,11 +2,12 @@
 #Requires -RunAsAdministrator
 <#
 .SYNOPSIS
-  One-time, explicit administrator-managed Defender exclusions for HomeWatch.
+  Explicit, locally administrator-managed Defender exclusions for HomeWatch caches and game folders.
 .DESCRIPTION
   Adds/removes precise per-user HomeWatch package staging folders and explicitly
-  supplied local game library folders. Never called by the HomeWatch agent,
-  updater service or web UI. Changes remain under Windows administrator control.
+  supplied local game library folders. Can be launched by a local administrator
+  through the HomeWatch Launcher after UAC approval. The updater service and
+  web UI cannot trigger this operation.
 .EXAMPLE
   .\Manage-DefenderExclusions.ps1 -Action Add -GameFolders 'D:\Games'
 .EXAMPLE
@@ -20,12 +21,19 @@ param(
     [ValidateSet('Add', 'Remove')]
     [string]$Action,
 
-    [Parameter(Mandatory = $true)]
-    [ValidateNotNullOrEmpty()]
-    [string[]]$GameFolders
+    [Parameter(Mandatory = $false)]
+    [string[]]$GameFolders = @(),
+
+    # Used only after the elevated HomeWatch GUI has presented its own explicit
+    # confirmation. Windows PowerShell 5.1 cannot pass -Confirm:$false via -File.
+    [switch]$ConfirmedInLocalUi
 )
 
 $ErrorActionPreference = 'Stop'
+if ($ConfirmedInLocalUi) {
+    # The GUI already asked twice. Still requires a locally elevated token.
+    $ConfirmPreference = 'None'
+}
 
 if (-not (Get-Command Get-MpPreference -ErrorAction SilentlyContinue) -or
     -not (Get-Command Add-MpPreference -ErrorAction SilentlyContinue) -or

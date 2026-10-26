@@ -6,7 +6,11 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>HomeWatchAgent</AssemblyName>
-    <Version>0.5.2</Version>
+    <Version>0.5.3</Version>
     <ApplicationIcon>HomeWatch.ico</ApplicationIcon>
   </PropertyGroup>
+  <ItemGroup>
+    <!-- Bundled inside HomeWatchAgent.exe; does not change the three-binary updater archive. -->
+    <EmbeddedResource Include="..\..\tools\Manage-DefenderExclusions.ps1" LogicalName="HomeWatch.Manage-DefenderExclusions.ps1" />
+  </ItemGroup>
 </Project>

@@ -21,6 +21,14 @@ internal static class Program
     [STAThread]
     static void Main(string[] args)
     {
+        // Local-only administrative window: requires interactive UAC approval.
+        // This dispatch happens before the per-session agent mutex.
+        if (args.Any(x => x.Equals(DefenderSetup.AdminArgument, StringComparison.OrdinalIgnoreCase)))
+        {
+            ApplicationConfiguration.Initialize();
+            DefenderSetup.ShowElevated();
+            return;
+        }
         bool openPortal = args.Any(x => x.Equals("--apps", StringComparison.OrdinalIgnoreCase));
         using var singleton = new Mutex(true, SingleAgentMutex, out bool firstInstance);
         if (!firstInstance)
@@ -94,6 +102,7 @@ public sealed class AgentContext : ApplicationContext
         tray = new NotifyIcon { Icon = LoadBrandIcon(), Visible = true, Text = "HomeWatch Launcher" };
         var menu = new ContextMenuStrip();
         menu.Items.Add("Open HomeWatch Launcher", null, (_, _) => ShowAppPortal());
+        menu.Items.Add("Performance settings (admin)...", null, (_, _) => DefenderSetup.OpenWithUac());
         menu.Items.Add("Status", null, (_, _) => ShowStatus());
         tray.DoubleClick += (_, _) => ShowAppPortal();
         menu.Items.Add("Exit", null, (_, _) => { tray.Visible = false; Application.Exit(); });
