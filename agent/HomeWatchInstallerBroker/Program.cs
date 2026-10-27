@@ -156,7 +156,7 @@ internal sealed class BrokerWorker(ILogger<BrokerWorker> log) : BackgroundServic
                 await pipe.WaitForConnectionAsync(stoppingToken);
                 // One request per connection. No request supplies executable path,
                 // arguments, destination or administrative commands.
-                await HandleAsync(pipe, stoppingToken);
+                await HandleAsync(pipe, stoppingToken, log);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { return; }
             catch (Exception e) { log.LogWarning("Rejected installer staging request: {Error}", e.Message);
@@ -164,39 +164,77 @@ internal sealed class BrokerWorker(ILogger<BrokerWorker> log) : BackgroundServic
         }
     }
 
-    private static async Task HandleAsync(NamedPipeServerStream pipe, CancellationToken stop)
+    private static async Task HandleAsync(NamedPipeServerStream pipe, CancellationToken stop, ILogger<BrokerWorker> log)
     {
-        // Read a bounded request FIRST. ImpersonateNamedPipeClient works on the
-        // most recent message read and must not be called before a pipe read.
-        var request = new byte[24];
-        int bytes = 0;
-        while (bytes < request.Length)
-        {
-            int n = await pipe.ReadAsync(request.AsMemory(bytes, 1), stop);
-            if (n != 1) throw new IOException("Client closed pipe before sending a catalogue ID");
-            if (request[bytes] == (byte)'\n') break;
-            bytes++;
-        }
-        if (bytes >= request.Length)
-            throw new IOException("Installer broker request is too long");
-        string line = Encoding.ASCII.GetString(request, 0, bytes).Trim();
-        string sid = "";
-        pipe.RunAsClient(() => sid = WindowsIdentity.GetCurrent().User?.Value ?? "");
-        if (!Regex.IsMatch(sid, @"^S-1-5-21-(\d+-){3}\d+$"))
-            throw new UnauthorizedAccessException("Installer requests require a local Windows account");
-        if (!int.TryParse(line, out int id) || id <= 0)
-            throw new IOException("Only a positive catalogue identifier is accepted");
-        using var writer = new StreamWriter(pipe, new UTF8Encoding(false), 1024, leaveOpen:true) { AutoFlush = true };
+        // Create the response writer BEFORE parsing or impersonating. Every
+        // rejectable request must receive a structured ERROR reply, otherwise
+        // Windows clients only report the misleading "closed pipe" message.
+        // The writer does not close the shared duplex pipe before we're done.
+        using var writer = new StreamWriter(pipe, new UTF8Encoding(false), 1024,
+            leaveOpen: true) { AutoFlush = true };
+        string sid = "unverified";
+        int id = 0;
         try
         {
+            // Bound request reading so a client cannot occupy the service pipe
+            // forever without sending a complete catalogue identifier.
+            using var requestTimeout = CancellationTokenSource.CreateLinkedTokenSource(stop);
+            requestTimeout.CancelAfter(TimeSpan.FromSeconds(20));
+            var request = new byte[24];
+            int bytes = 0;
+            while (bytes < request.Length)
+            {
+                int n = await pipe.ReadAsync(request.AsMemory(bytes, 1), requestTimeout.Token);
+                if (n != 1) throw new IOException("Client disconnected before completing the request");
+                if (request[bytes] == (byte)'\n') break;
+                bytes++;
+            }
+            if (bytes >= request.Length)
+                throw new IOException("Installer broker request is too long");
+            string line = Encoding.ASCII.GetString(request, 0, bytes).Trim();
+            // The caller SID must be captured from the Windows pipe impersonation
+            // context; never accept a SID supplied in the IPC request.
+            try
+            {
+                pipe.RunAsClient(() => sid = WindowsIdentity.GetCurrent().User?.Value ?? "");
+            }
+            catch (Exception ex)
+            {
+                throw new UnauthorizedAccessException("Windows could not verify the local requesting account", ex);
+            }
+            if (!Regex.IsMatch(sid, @"^S-1-5-21-(\d+-){3}\d+$"))
+                throw new UnauthorizedAccessException("Installer requests require a local Windows account");
+            if (!int.TryParse(line, out id) || id <= 0)
+                throw new IOException("Only a positive catalogue identifier is accepted");
             var entry = await StageApprovedAsync(sid, id, stop);
             await writer.WriteLineAsync("OK " + entry);
             BrokerSettings.Audit("approved-stage catalogue=" + id + " sid=" + sid);
         }
-        catch (Exception e)
+        catch (OperationCanceledException) when (stop.IsCancellationRequested)
         {
-            await writer.WriteLineAsync("ERROR " + e.Message.Replace('\r',' ').Replace('\n',' '));
-            BrokerSettings.Audit("denied catalogue=" + id + " sid=" + sid + " " + e.Message);
+            throw;
+        }
+        catch (Exception ex)
+        {
+            // Record the underlying exception and stack privately for service
+            // troubleshooting. Don't send that privileged diagnostic to the child.
+            BrokerSettings.Audit("denied catalogue=" + id + " sid=" + sid +
+                " " + ex.GetType().Name + " " + ex.Message);
+            log.LogWarning(ex, "Installer broker request failed: catalogue={CatalogueId}, sid={Sid}", id, sid);
+            string safeMessage = ex switch
+            {
+                UnauthorizedAccessException => ex.Message,
+                IOException => ex.Message,
+                OperationCanceledException => "Installer broker request timed out",
+                _ => "Broker could not complete installer staging; check its audit log"
+            };
+            try
+            {
+                if (pipe.IsConnected)
+                    await writer.WriteLineAsync("ERROR " + safeMessage.Replace('\r', ' ').Replace('\n', ' '));
+            }
+            catch (IOException) { /* Client disconnected; original failure is logged. */ }
+            catch (ObjectDisposedException) { /* Client disconnected. */ }
         }
     }
 

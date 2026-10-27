@@ -20,7 +20,7 @@ def test_three_binary_updater_still_unchanged():
 
 
 def test_narrow_pipe_input_and_server_authorisation():
-    assert 'int.TryParse(line, out int id)' in BROKER
+    assert 'int.TryParse(line, out id)' in BROKER
     assert 'agent/elevation/installer/{id}' in BROKER
     assert 'pipe.RunAsClient(' in BROKER
     assert 'file.GetProperty("sha256")' in BROKER

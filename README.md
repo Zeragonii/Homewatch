@@ -319,3 +319,8 @@ See [RELEASE-v0.5.9a.md](RELEASE-v0.5.9a.md) for the two-row admin settings fix 
 ### v0.5.9b — Reconfigure HomeWatch server URL
 
 See [RELEASE-v0.5.9b.md](RELEASE-v0.5.9b.md). The administrator-only Performance settings window has **Server connection...**, which verifies the existing device enrolment at a new address and saves only the URL. The tray agent reloads the new address without clearing device identity. The installer broker continues to require HTTPS; the Docker Uvicorn server needs a TLS reverse proxy.
+
+
+### v0.5.9c — installer broker named-pipe diagnostics
+
+See `RELEASE-v0.5.9c.md`. This changes both the launcher and the separately installed installer-broker service. You must install the v0.5.9.3 signed Windows **installer once as administrator** to replace the broker service; the three-file automatic agent update does not upgrade it. No device reset or server migration is needed.
