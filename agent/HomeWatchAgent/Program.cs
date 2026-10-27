@@ -77,6 +77,7 @@ public sealed class AgentContext : ApplicationContext
     private AppPortalForm? appPortal;
     private readonly EventWaitHandle portalSignal;
     private readonly System.Windows.Forms.Timer portalSignalTimer;
+    private WellbeingManager? wellbeing;
     AgentConfig config = new();
     readonly Dictionary<string, int> usage = new(StringComparer.OrdinalIgnoreCase);
     string currentApp = "";
@@ -117,10 +118,19 @@ public sealed class AgentContext : ApplicationContext
             config.ServerUrl = setup.ServerUrl.TrimEnd('/'); SaveConfig();
         }
         http.BaseAddress = new Uri(config.ServerUrl.TrimEnd('/') + "/");
+        // Local per-user wellbeing scheduler survives closed Launcher windows.
+        // No special privileges, no screen-time policy dependency.
+        wellbeing = new WellbeingManager(http, Request, IsActiveConsoleSession, () => !string.IsNullOrEmpty(config.DeviceId) && !string.IsNullOrEmpty(config.DeviceToken), IdleSeconds, logDir, Log);
         // All-user autostart is provisioned by the elevated installer (HKLM Run).
         // Don't create a per-user HKCU Run key here.
         _ = LoopAsync();
         if (openPortalAtStartup) portalSignal.Set();
+    }
+
+    protected override void ExitThreadCore()
+    {
+        wellbeing?.Dispose();
+        base.ExitThreadCore();
     }
 
     void LoadOrCreateConfig()

@@ -297,3 +297,8 @@ immediately, transitions to **Stop game** when the approved executable is
 running, then returns to Play after exit. Repeated clicks during launch are
 ignored, running games are tracked by exact executable path and Windows
 session, and Stop requires confirmation. No new server migration.
+
+
+## v0.5.7 — Wellbeing reminders
+
+The parent-facing **Wellbeing** tab now configures child-specific hydration, toilet and custom reminders. Reminders support accumulated active time, elapsed logged-in clock time, or chosen daily times; optional snooze, editable messages and an audit log are included. The tray agent tracks progress locally and delivers topmost friendly popups even if the game launcher is closed. See [RELEASE-v0.5.7.md](RELEASE-v0.5.7.md) for rollout instructions and controller/fullscreen limitations.

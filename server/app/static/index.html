@@ -16,7 +16,7 @@
 <div id="app" class="hidden">
 <header>
   <div class="brand-stack"><img src="/static/homewatch-logo.png" alt="HomeWatch logo" class="brand-logo"><div><h1>HomeWatch</h1><span class="muted">Family console</span></div></div>
-  <div class="header-actions"><nav><button id="nav-dashboard" class="nav active" onclick="showView('dashboard')">Dashboard</button><button id="nav-screentime" class="nav" onclick="showView('screentime')">Screen time</button><button id="nav-applications" class="nav" onclick="showView('applications')">Applications <span id="appRequestBadge" class="badge hidden">0</span></button><button id="nav-onboarding" class="nav" onclick="showView('onboarding')">Onboarding <span id="pendingBadge" class="badge hidden">0</span></button></nav><button class="secondary" onclick="logout()">Sign out</button></div>
+  <div class="header-actions"><nav><button id="nav-dashboard" class="nav active" onclick="showView('dashboard')">Dashboard</button><button id="nav-screentime" class="nav" onclick="showView('screentime')">Screen time</button><button id="nav-wellbeing" class="nav" onclick="showView('wellbeing')">Wellbeing</button><button id="nav-applications" class="nav" onclick="showView('applications')">Applications <span id="appRequestBadge" class="badge hidden">0</span></button><button id="nav-onboarding" class="nav" onclick="showView('onboarding')">Onboarding <span id="pendingBadge" class="badge hidden">0</span></button></nav><button class="secondary" onclick="logout()">Sign out</button></div>
 </header>
 <main>
 <section id="view-dashboard" class="view">
@@ -34,6 +34,31 @@
 <section id="view-screentime" class="view hidden">
   <div class="page-title"><div><h2>Screen time</h2><p class="muted">Child-level schedules and allowances shared across all of their devices.</p></div><span id="screenTimeZone" class="muted small"></span></div>
   <div id="screenTimeChildren"></div>
+</section>
+
+<section id="view-wellbeing" class="view hidden">
+  <div class="page-title"><div><h2>Wellbeing reminders</h2><p class="muted">Friendly hydration, toilet and custom reminders. Independent of screen-time restrictions.</p></div><button class="secondary" onclick="loadWellbeing()">Refresh</button></div>
+  <section class="card">
+    <div class="section-heading"><h3 id="wellbeingEditorHeading">Add reminder</h3><span class="muted small">Reminders apply to a child across all enrolled devices.</span></div>
+    <form id="wellbeingForm" class="wellbeing-form" onsubmit="saveWellbeing(event)">
+      <input type="hidden" id="wellbeingRuleId">
+      <label>Child<select id="wellbeingChild" required></select></label>
+      <label>Type<select id="wellbeingKind" onchange="wellbeingPreset()"><option value="hydration">Hydration 💧</option><option value="toilet">Toilet 🚽</option><option value="custom">Custom reminder</option></select></label>
+      <label>Schedule<select id="wellbeingMode" onchange="wellbeingModeChanged()"><option value="active">Accumulated active time</option><option value="clock">Clock time while logged in</option><option value="scheduled">Specific daily times</option></select></label>
+      <label id="wellbeingIntervalLabel">Repeat every (minutes)<input type="number" id="wellbeingInterval" value="60" min="5" max="720" required></label>
+      <label class="hidden" id="wellbeingTimesLabel">Times (HH:MM, comma-separated)<input id="wellbeingTimes" placeholder="12:00, 15:00"></label>
+      <label>Title<input id="wellbeingTitle" maxlength="100" required value="Hydration Break!"></label>
+      <label class="wide">Message<textarea id="wellbeingMessage" maxlength="400" rows="2" required>Time for a little drink of water! 💧</textarea></label>
+      <label>Idle threshold (seconds)<input type="number" id="wellbeingIdle" min="30" max="900" value="180" required></label>
+      <label>Snooze length (minutes)<input type="number" id="wellbeingSnoozeMinutes" min="1" max="30" value="5" required></label>
+      <label class="inline"><input type="checkbox" id="wellbeingAllowSnooze" checked> Allow snooze</label>
+      <label class="inline"><input type="checkbox" id="wellbeingEnabled" checked> Enabled</label>
+      <div class="wide row"><button type="submit" id="wellbeingSave">Save reminder</button><button type="button" class="secondary" onclick="resetWellbeingForm()">New reminder</button><span id="wellbeingFeedback" class="muted small" role="status"></span></div>
+    </form>
+    <p class="muted small">Active time counts keyboard/mouse activity across Windows, not a single game. Controller-only gameplay may not register until further detection support is added. Scheduled reminders use the Windows device's local clock.</p>
+  </section>
+  <section class="card"><div class="section-heading"><h3>Configured reminders</h3></div><div id="wellbeingRules" class="wellbeing-rules"></div></section>
+  <section class="card"><div class="section-heading"><h3>Recent reminder activity</h3><span class="muted small">Acknowledged means the button was pressed, not that a drink/toilet break happened.</span></div><div id="wellbeingEvents" class="wellbeing-events"></div></section>
 </section>
 
 <section id="view-applications" class="view hidden">

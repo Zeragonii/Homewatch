@@ -34,5 +34,5 @@ def test_agent_status_uses_its_own_directory():
 
 def test_numeric_release_version_for_existing_updater():
     workflow = (ROOT / '.github/workflows/release.yml').read_text()
-    assert "$version = '0.5.6'" in workflow
-    assert '<Version>0.5.6</Version>' in (ROOT / 'agent/HomeWatchAgent/HomeWatchAgent.csproj').read_text()
+    assert "$version = '0.5.7'" in workflow
+    assert '<Version>0.5.7</Version>' in (ROOT / 'agent/HomeWatchAgent/HomeWatchAgent.csproj').read_text()

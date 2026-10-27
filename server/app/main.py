@@ -322,6 +322,34 @@ class ApplicationLaunch(Base):
     detail: Mapped[str] = mapped_column(String(255), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
+
+
+class WellbeingRule(Base):
+    __tablename__ = "wellbeing_rules"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    child_id: Mapped[int] = mapped_column(ForeignKey("children.id"), nullable=False, index=True)
+    kind: Mapped[str] = mapped_column(String(24), nullable=False)
+    deleted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=text("false"))
+    title: Mapped[str] = mapped_column(String(100), nullable=False)
+    message: Mapped[str] = mapped_column(String(400), nullable=False)
+    mode: Mapped[str] = mapped_column(String(20), nullable=False, default="active")
+    interval_minutes: Mapped[int] = mapped_column(Integer, nullable=False, default=60)
+    scheduled_times: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    idle_threshold_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=180)
+    allow_snooze: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default=text("true"))
+    snooze_minutes: Mapped[int] = mapped_column(Integer, nullable=False, default=5)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default=text("true"))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+class WellbeingEvent(Base):
+    __tablename__ = "wellbeing_events"
+    event_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    rule_id: Mapped[int] = mapped_column(ForeignKey("wellbeing_rules.id"), nullable=False, index=True)
+    device_id: Mapped[str] = mapped_column(ForeignKey("devices.id"), nullable=False, index=True)
+    event: Mapped[str] = mapped_column(String(20), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
 Base.metadata.create_all(engine)
 
 # Lightweight bootstrap migration for existing v0.1 databases.
@@ -820,6 +848,147 @@ def delete_app_limit(limit_id:int, db:Session=Depends(db_session)):
     row=db.get(AppLimit,limit_id)
     if not row: raise HTTPException(404,"App limit not found")
     db.delete(row);db.commit();return {"ok":True}
+
+
+
+
+# v0.5.7: gentle, per-child wellbeing prompts independent of screen-time blocks.
+class WellbeingRuleBody(BaseModel):
+    kind: str = "custom"
+    title: str = ""
+    message: str = ""
+    mode: str = "active"
+    interval_minutes: int = 60
+    scheduled_times: list[str] = []
+    idle_threshold_seconds: int = 180
+    allow_snooze: bool = True
+    snooze_minutes: int = 5
+    enabled: bool = True
+
+
+class WellbeingEventBody(BaseModel):
+    event_id: str
+    rule_id: int
+    event: str
+
+
+def wellbeing_rule_json(row: WellbeingRule) -> dict:
+    return {"id": row.id, "child_id": row.child_id, "kind": row.kind,
+            "title": row.title, "message": row.message, "mode": row.mode,
+            "interval_minutes": row.interval_minutes,
+            "scheduled_times": json.loads(row.scheduled_times or "[]"),
+            "idle_threshold_seconds": row.idle_threshold_seconds,
+            "allow_snooze": row.allow_snooze, "snooze_minutes": row.snooze_minutes,
+            "enabled": row.enabled, "updated_at": row.updated_at.isoformat() if row.updated_at else ""}
+
+
+def validated_wellbeing(body: WellbeingRuleBody) -> dict:
+    kind = body.kind.strip().lower()
+    title, message = body.title.strip(), body.message.strip()
+    if kind not in ("hydration", "toilet", "custom"):
+        raise HTTPException(400, "Invalid reminder kind")
+    if not (1 <= len(title) <= 100 and 1 <= len(message) <= 400):
+        raise HTTPException(400, "Title and message required (up to 100/400 characters)")
+    if body.mode not in ("active", "clock", "scheduled"):
+        raise HTTPException(400, "Invalid reminder scheduling mode")
+    if not 5 <= body.interval_minutes <= 720:
+        raise HTTPException(400, "Interval must be 5–720 minutes")
+    if not 30 <= body.idle_threshold_seconds <= 900:
+        raise HTTPException(400, "Idle threshold must be 30–900 seconds")
+    if not 1 <= body.snooze_minutes <= 30:
+        raise HTTPException(400, "Snooze must be 1–30 minutes")
+    times = sorted(set(body.scheduled_times))
+    if len(times) > 12 or any(not re.fullmatch(r'(?:[01]\d|2[0-3]):[0-5]\d', t) for t in times):
+        raise HTTPException(400, "Specify at most 12 valid HH:MM reminder times")
+    if body.mode == "scheduled" and not times:
+        raise HTTPException(400, "Scheduled reminders require at least one HH:MM time")
+    return {"kind": kind, "title": title, "message": message,
+            "mode": body.mode, "interval_minutes": body.interval_minutes,
+            "scheduled_times": json.dumps(times), "idle_threshold_seconds": body.idle_threshold_seconds,
+            "allow_snooze": body.allow_snooze, "snooze_minutes": body.snooze_minutes,
+            "enabled": body.enabled}
+
+
+@app.get('/api/wellbeing', dependencies=[Depends(require_admin)])
+def admin_wellbeing(db: Session = Depends(db_session)):
+    children = db.scalars(select(Child).order_by(Child.name)).all()
+    rules = db.scalars(select(WellbeingRule).where(WellbeingRule.deleted.is_(False)).order_by(WellbeingRule.id)).all()
+    return {"children": [{"id": c.id, "name": c.name} for c in children],
+            "rules": [wellbeing_rule_json(r) for r in rules], "timezone": FAMILY_TIMEZONE}
+
+
+@app.post('/api/children/{child_id}/wellbeing', dependencies=[Depends(require_admin)])
+def add_wellbeing_rule(child_id: int, body: WellbeingRuleBody, db: Session = Depends(db_session)):
+    if not db.get(Child, child_id):
+        raise HTTPException(404, "Child not found")
+    rule = WellbeingRule(child_id=child_id, **validated_wellbeing(body))
+    db.add(rule); db.commit(); db.refresh(rule)
+    return wellbeing_rule_json(rule)
+
+
+@app.put('/api/wellbeing/{rule_id}', dependencies=[Depends(require_admin)])
+def update_wellbeing_rule(rule_id: int, body: WellbeingRuleBody, db: Session = Depends(db_session)):
+    rule = db.get(WellbeingRule, rule_id)
+    if not rule or rule.deleted: raise HTTPException(404, "Reminder not found")
+    for key, value in validated_wellbeing(body).items(): setattr(rule, key, value)
+    rule.updated_at = datetime.now(timezone.utc)
+    db.commit(); db.refresh(rule)
+    return wellbeing_rule_json(rule)
+
+
+@app.delete('/api/wellbeing/{rule_id}', dependencies=[Depends(require_admin)])
+def delete_wellbeing_rule(rule_id: int, db: Session = Depends(db_session)):
+    rule = db.get(WellbeingRule, rule_id)
+    if not rule or rule.deleted: raise HTTPException(404, "Reminder not found")
+    # Soft delete preserves the audit trail while removing it from all UI/agents.
+    rule.deleted = True
+    rule.enabled = False
+    rule.updated_at = datetime.now(timezone.utc)
+    db.commit()
+    return {"ok": True}
+
+
+@app.get('/api/wellbeing/events', dependencies=[Depends(require_admin)])
+def admin_wellbeing_events(child_id: int | None = None, db: Session = Depends(db_session)):
+    stmt = (select(WellbeingEvent, WellbeingRule, Device, Child)
+            .join(WellbeingRule, WellbeingEvent.rule_id == WellbeingRule.id)
+            .join(Device, WellbeingEvent.device_id == Device.id)
+            .join(Child, WellbeingRule.child_id == Child.id))
+    if child_id is not None: stmt = stmt.where(WellbeingRule.child_id == child_id)
+    rows = db.execute(stmt.order_by(WellbeingEvent.created_at.desc()).limit(150)).all()
+    return {"events": [{"event_id": e.event_id, "kind": r.kind, "title": r.title,
+                        "child": c.name, "device": d.name, "event": e.event,
+                        "created_at": e.created_at.isoformat()} for e, r, d, c in rows]}
+
+
+@app.get('/agent/wellbeing')
+def agent_wellbeing(device: Device = Depends(agent_auth), db: Session = Depends(db_session)):
+    rules = db.scalars(select(WellbeingRule).where(WellbeingRule.child_id == device.child_id,
+                                                   WellbeingRule.enabled.is_(True),
+                                                   WellbeingRule.deleted.is_(False)).order_by(WellbeingRule.id)).all()
+    return {"rules": [wellbeing_rule_json(row) for row in rules]}
+
+
+@app.post('/agent/wellbeing/events')
+def agent_wellbeing_event(body: WellbeingEventBody, device: Device = Depends(agent_auth),
+                          db: Session = Depends(db_session)):
+    if body.event not in ("shown", "acknowledged", "snoozed"):
+        raise HTTPException(400, "Unsupported reminder event")
+    try: uuid.UUID(body.event_id)
+    except (ValueError, AttributeError): raise HTTPException(400, "Invalid event identifier")
+    rule = db.get(WellbeingRule, body.rule_id)
+    if not rule or rule.child_id != device.child_id:
+        raise HTTPException(404, "Reminder not assigned to this child")
+    # Idempotent client retry after connectivity loss.
+    event = db.get(WellbeingEvent, body.event_id)
+    if event:
+        if (event.rule_id, event.device_id, event.event) != (rule.id, device.id, body.event):
+            raise HTTPException(409, "Event identifier already used")
+        return {"ok": True}
+    db.add(WellbeingEvent(event_id=body.event_id, rule_id=rule.id, device_id=device.id,
+                          event=body.event))
+    db.commit()
+    return {"ok": True}
 
 
 @app.post("/api/pending/{installation_id}/approve", dependencies=[Depends(require_admin)])

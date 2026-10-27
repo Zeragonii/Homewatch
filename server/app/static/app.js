@@ -24,7 +24,7 @@ async function login(){try{await api('/api/login',{method:'POST',body:JSON.strin
 async function logout(){await fetch('/api/logout',{method:'POST'});location.reload()}
 async function showApp(){loginPanel.classList.add('hidden');appPanel.classList.remove('hidden');await refresh();if(!refreshTimer)refreshTimer=setInterval(refresh,5000);await loadNasSettings()}
 
-function showView(view){currentView=view;['dashboard','screentime','applications','onboarding'].forEach(v=>{document.getElementById(`view-${v}`).classList.toggle('hidden',v!==view);document.getElementById(`nav-${v}`).classList.toggle('active',v===view)});if(view==='screentime')loadScreenTime();if(view==='applications'){loadApplications();loadSigningCertificate()}}
+function showView(view){currentView=view;['dashboard','screentime','wellbeing','applications','onboarding'].forEach(v=>{document.getElementById(`view-${v}`).classList.toggle('hidden',v!==view);document.getElementById(`nav-${v}`).classList.toggle('active',v===view)});if(view==='screentime')loadScreenTime();if(view==='wellbeing')loadWellbeing();if(view==='applications'){loadApplications();loadSigningCertificate()}}
 
 async function refresh(){try{const next=await api('/api/dashboard');state=next;renderSummary();renderChildren();renderPending();patchDevices();lastRefresh.textContent=`Updated ${new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'})}`;if(currentView==='screentime')loadScreenTime();if(currentView==='applications')loadApplications();}catch(e){if(e.message==='AUTH'){appPanel.classList.add('hidden');loginPanel.classList.remove('hidden');if(refreshTimer){clearInterval(refreshTimer);refreshTimer=null}}}}
 
@@ -499,4 +499,72 @@ async function copySigningFingerprint(){
   if(!signingCertMetadata?.sha256)return;
   try{await navigator.clipboard.writeText(signingCertMetadata.sha256);}
   catch{prompt('Copy the SHA-256 fingerprint:',signingCertMetadata.sha256);}
+}
+
+
+// v0.5.7: wellbeing rules are administered per child. Editing does not refresh
+// on the five-second dashboard heartbeat, so parents never lose form input.
+let wellbeingSnapshot={children:[],rules:[]};
+function wellbeingPreset(){
+  if(document.getElementById('wellbeingRuleId').value)return;
+  const kind=document.getElementById('wellbeingKind').value;
+  const defaults={hydration:['Hydration Break!','Time for a little drink of water! 💧'],toilet:['Toilet Break!','Take a moment to see if you need the toilet. 🚽'],custom:['Stretch Break!','Take a little break from the screen!']};
+  document.getElementById('wellbeingTitle').value=defaults[kind][0];
+  document.getElementById('wellbeingMessage').value=defaults[kind][1];
+}
+function wellbeingModeChanged(){
+  const scheduled=document.getElementById('wellbeingMode').value==='scheduled';
+  document.getElementById('wellbeingIntervalLabel').classList.toggle('hidden',scheduled);
+  document.getElementById('wellbeingTimesLabel').classList.toggle('hidden',!scheduled);
+}
+function resetWellbeingForm(){
+  const form=document.getElementById('wellbeingForm');form.reset();
+  document.getElementById('wellbeingRuleId').value='';
+  document.getElementById('wellbeingChild').disabled=false;
+  document.getElementById('wellbeingEditorHeading').textContent='Add reminder';
+  document.getElementById('wellbeingSave').textContent='Save reminder';
+  document.getElementById('wellbeingFeedback').textContent='';
+  wellbeingPreset();wellbeingModeChanged();
+}
+function editWellbeing(id){
+  const r=wellbeingSnapshot.rules.find(x=>x.id===id);if(!r)return;
+  document.getElementById('wellbeingRuleId').value=r.id;
+  document.getElementById('wellbeingChild').value=String(r.child_id);
+  document.getElementById('wellbeingChild').disabled=true;
+  for(const [name,value] of [['Kind',r.kind],['Mode',r.mode],['Title',r.title],['Message',r.message],['Interval',r.interval_minutes],['Times',r.scheduled_times.join(', ')],['Idle',r.idle_threshold_seconds],['SnoozeMinutes',r.snooze_minutes]])document.getElementById('wellbeing'+name).value=value;
+  document.getElementById('wellbeingAllowSnooze').checked=r.allow_snooze;
+  document.getElementById('wellbeingEnabled').checked=r.enabled;
+  document.getElementById('wellbeingEditorHeading').textContent='Edit reminder';
+  document.getElementById('wellbeingSave').textContent='Update reminder';
+  wellbeingModeChanged();document.getElementById('wellbeingForm').scrollIntoView({behavior:'smooth',block:'start'});
+}
+async function loadWellbeing(){
+  try{
+    const [data,history]=await Promise.all([api('/api/wellbeing'),api('/api/wellbeing/events')]);wellbeingSnapshot=data;
+    const child=document.getElementById('wellbeingChild'),old=child.value;
+    child.replaceChildren(...data.children.map(c=>{const o=document.createElement('option');o.value=c.id;o.textContent=c.name;return o}));
+    if(data.children.some(c=>String(c.id)===old))child.value=old;
+    if(!document.getElementById('wellbeingRuleId').value)child.disabled=false;
+    document.getElementById('wellbeingRules').innerHTML=data.rules.map(r=>{
+      const c=data.children.find(x=>x.id===r.child_id);
+      const schedule=r.mode==='scheduled'?r.scheduled_times.join(', '):`every ${r.interval_minutes} minutes (${r.mode})`;
+      return `<div class="wellbeing-row"><div><b>${esc(r.title)}</b> <span class="muted small">${esc(c?.name||'?')} · ${esc(schedule)} · ${r.enabled?'Enabled':'Disabled'}</span><p class="muted small">${esc(r.message)}</p></div><div class="row"><button class="secondary" onclick="editWellbeing(${r.id})">Edit</button><button class="danger" onclick="deleteWellbeing(${r.id})">Delete</button></div></div>`;
+    }).join('')||'<p class="muted">No reminders configured yet.</p>';
+    document.getElementById('wellbeingEvents').innerHTML=history.events.map(e=>`<div class="wellbeing-event"><span><b>${esc(e.child)}</b> · ${esc(e.title)} · ${esc(e.event)}</span><span class="muted small">${esc(e.device)} · ${new Date(e.created_at).toLocaleString()}</span></div>`).join('')||'<p class="muted">No reminders shown yet.</p>';
+  }catch(e){document.getElementById('wellbeingRules').textContent='Could not load reminders: '+e.message}
+}
+async function saveWellbeing(event){
+  event.preventDefault();const el=n=>document.getElementById('wellbeing'+n),id=el('RuleId').value,childId=Number(el('Child').value);
+  const times=el('Times').value.split(',').map(s=>s.trim()).filter(Boolean);
+  const body={kind:el('Kind').value,title:el('Title').value.trim(),message:el('Message').value.trim(),mode:el('Mode').value,interval_minutes:Number(el('Interval').value),scheduled_times:times,idle_threshold_seconds:Number(el('Idle').value),snooze_minutes:Number(el('SnoozeMinutes').value),allow_snooze:el('AllowSnooze').checked,enabled:el('Enabled').checked};
+  const feedback=el('Feedback');feedback.textContent='Saving…';
+  try{
+    await api(id?`/api/wellbeing/${id}`:`/api/children/${childId}/wellbeing`,{method:id?'PUT':'POST',body:JSON.stringify(body)});
+    resetWellbeingForm();el('Child').disabled=false;await loadWellbeing();
+    feedback.textContent='Saved';
+  }catch(e){feedback.textContent='Unable to save: '+e.message}
+}
+async function deleteWellbeing(id){
+  if(!confirm('Remove this reminder? Existing history will be retained.'))return;
+  try{await api(`/api/wellbeing/${id}`,{method:'DELETE'});resetWellbeingForm();document.getElementById('wellbeingChild').disabled=false;await loadWellbeing()}catch(e){alert(e.message)}
 }

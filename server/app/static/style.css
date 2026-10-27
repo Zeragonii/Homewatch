@@ -46,3 +46,8 @@ button:disabled{opacity:.6;cursor:not-allowed}
 .nas-config-form #nasFeedback{grid-column:1/-1}.nas-browser{border:1px solid #33445f;border-radius:12px;padding:12px;margin:10px 0}
 .nas-files{display:flex;flex-wrap:wrap;gap:7px;max-height:260px;overflow:auto;margin-top:10px}.nas-file{max-width:100%;text-align:left;word-break:break-word;font-size:.83rem}
 #nasHashProgress{width:100%;height:12px;margin-top:8px}@media(max-width:800px){.nas-config-form{grid-template-columns:1fr 1fr}}@media(max-width:520px){.nas-config-form{grid-template-columns:1fr}}
+
+/* v0.5.7 wellbeing management */
+.wellbeing-form{display:grid;grid-template-columns:repeat(4,minmax(160px,1fr));gap:12px;align-items:end}.wellbeing-form label{display:grid;gap:6px;font-size:.86rem;color:#b9c9de}.wellbeing-form input:not([type=checkbox]),.wellbeing-form textarea,.wellbeing-form select{width:100%;min-width:0}.wellbeing-form .wide{grid-column:1/-1}.wellbeing-form label.inline{display:flex;align-items:center;gap:10px}.wellbeing-form label.inline input{width:auto}.wellbeing-row,.wellbeing-event{padding:12px 0;border-bottom:1px solid #29344b;display:flex;justify-content:space-between;align-items:center;gap:15px}.wellbeing-row p{margin:6px 0 0}.wellbeing-event{font-size:.88rem}@media(max-width:900px){.wellbeing-form{grid-template-columns:repeat(2,minmax(0,1fr))}}@media(max-width:550px){.wellbeing-form{grid-template-columns:1fr}.wellbeing-row,.wellbeing-event{align-items:flex-start;flex-direction:column}}
+
+@media(max-width:760px){nav{flex-wrap:wrap;max-width:100%}nav .nav{flex:1 1 auto}}
