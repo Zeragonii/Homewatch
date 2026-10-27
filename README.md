@@ -289,3 +289,11 @@ See [RELEASE-v0.5.4.md](RELEASE-v0.5.4.md) for the **required rollout order**. P
 ### v0.5.5 game uninstallation
 
 See [`RELEASE-v0.5.5.md`](RELEASE-v0.5.5.md). The launcher prefers Windows' registered uninstaller; otherwise it offers confirmed removal of a safe dedicated directory underneath your configured game roots. Removal is per-device and uses normal Windows permissions.
+
+### v0.5.6 — Single-instance Play and Stop game
+
+See [`RELEASE-v0.5.6.md`](RELEASE-v0.5.6.md). Play becomes **Starting…**
+immediately, transitions to **Stop game** when the approved executable is
+running, then returns to Play after exit. Repeated clicks during launch are
+ignored, running games are tracked by exact executable path and Windows
+session, and Stop requires confirmation. No new server migration.

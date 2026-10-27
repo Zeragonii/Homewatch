@@ -25,6 +25,12 @@ public sealed class AppPortalForm : Form
     private readonly Panel detailPane;
     private readonly Label footer;
     private readonly System.Windows.Forms.Timer timer;
+    private readonly System.Windows.Forms.Timer gameStateTimer;
+    private readonly GameProcessTracker gameProcesses = new();
+    private Button? currentPrimaryButton;
+    private Label? currentPrimaryStatus;
+    private Button? currentUninstallButton;
+    private int? currentPrimaryAppId;
     private readonly string cacheDirectory = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "HomeWatch", "artwork");
     private List<PortalApplication> apps = new();
@@ -97,10 +103,15 @@ public sealed class AppPortalForm : Form
         Controls.Add(root);
         ShowDetails(null);
 
+        // Monitor running executables without requiring a network refresh or
+        // rebuilding the poster grid every time a game starts/exits.
+        gameStateTimer = new System.Windows.Forms.Timer { Interval = 1500 };
+        gameStateTimer.Tick += (_, _) => RefreshGameStates();
+        gameStateTimer.Start();
         timer = new System.Windows.Forms.Timer { Interval = 12000 };
         timer.Tick += async (_, _) => await LoadAppsAsync();
         Shown += async (_, _) => { timer.Start(); await LoadAppsAsync(); };
-        FormClosed += (_, _) => { timer.Stop(); timer.Dispose(); http.Dispose(); DisposePosterImages(); };
+        FormClosed += (_, _) => { timer.Stop(); timer.Dispose(); gameStateTimer.Stop(); gameStateTimer.Dispose(); http.Dispose(); DisposePosterImages(); };
     }
 
     private static Button ButtonFor(string title, Color color, int width, int height)
@@ -189,6 +200,7 @@ public sealed class AppPortalForm : Form
             finally { posterGrid.ResumeLayout(); }
             var selected = apps.FirstOrDefault(a => a.Id == selectedId);
             ShowDetails(selected);
+            RefreshGameStates();
             // Painting happens first; artwork downloads and caches asynchronously afterward.
             foreach (var app in apps)
                 if (app.ArtworkRevision > 0)
@@ -211,7 +223,7 @@ public sealed class AppPortalForm : Form
         var name = new Label { Text = app.DisplayName, Location = new Point(9, 211), Size = new Size(157, 29),
             Font = new Font("Segoe UI Semibold", 10, FontStyle.Bold), AutoEllipsis = true, ForeColor = TextColor };
         tile.Controls.Add(name);
-        var status = new Label { Text = app.IsCatalogue ? (app.InstalledApproved ? "✓ Ready to play" : app.InstalledRequestId > 0 ? "◷ Awaiting approval" : app.PackageStatus == "uninstalling" ? "Removing" : app.PackageStatus == "uninstalled" ? "↓ Available to install" : app.PackageStatus == "installing" ? "Installing" : "↓ Available to install") : approved ? "✓ Ready to play" : app.Status == "pending" ? "◷ Waiting for approval" : "Not available",
+        var status = new Label { Name = "tile-status", Text = app.IsCatalogue ? (app.InstalledApproved ? "✓ Ready to play" : app.InstalledRequestId > 0 ? "◷ Awaiting approval" : app.PackageStatus == "uninstalling" ? "Removing" : app.PackageStatus == "uninstalled" ? "↓ Available to install" : app.PackageStatus == "installing" ? "Installing" : "↓ Available to install") : approved ? "✓ Ready to play" : app.Status == "pending" ? "◷ Waiting for approval" : "Not available",
             ForeColor = approved || app.InstalledApproved ? Green : app.IsCatalogue ? Accent : app.Status == "pending" ? Amber : Muted,
             Location = new Point(9, 241), Size = new Size(157, 23), AutoEllipsis = true,
             Font = new Font("Segoe UI", 9) };
@@ -286,6 +298,10 @@ public sealed class AppPortalForm : Form
 
     private void ShowDetails(PortalApplication? app)
     {
+        currentPrimaryButton = null;
+        currentPrimaryStatus = null;
+        currentUninstallButton = null;
+        currentPrimaryAppId = null;
         detailPane.SuspendLayout();
         try
         {
@@ -311,8 +327,9 @@ public sealed class AppPortalForm : Form
             var approved = app?.Status == "approved" || app?.InstalledApproved == true;
             var statusText = app is null ? "Select a tile to see its details" : app.IsCatalogue ? (app.PackageStatus == "uninstalled" ? "↓ Available to install" : app.InstalledApproved ? "✓ Installed — ready to play" : app.InstalledRequestId > 0 ? "◷ Installed — waiting for parent approval" : "↓ In the family library") : approved ? "✓ Approved and ready" :
                 app.Status == "pending" ? "◷ Waiting for parent approval" : "Not approved";
-            content.Controls.Add(new Label { Text = statusText, ForeColor = approved ? Green : Amber, Dock = DockStyle.Fill,
-                Font = new Font("Segoe UI Semibold", 10, FontStyle.Bold) }, 0, 2);
+            var statusLabel = new Label { Text = statusText, ForeColor = approved ? Green : Amber, Dock = DockStyle.Fill,
+                Font = new Font("Segoe UI Semibold", 10, FontStyle.Bold) };
+            content.Controls.Add(statusLabel, 0, 2);
             content.Controls.Add(new Label { Text = app is not null && !string.IsNullOrWhiteSpace(app.Publisher) ? $"Publisher: {app.Publisher}" : "Publisher unavailable",
                 ForeColor = Muted, AutoEllipsis = true, Dock = DockStyle.Fill }, 0, 3);
             content.Controls.Add(new Label { Text = app is null ? "A nice place to keep your favourite games!" :
@@ -325,9 +342,12 @@ public sealed class AppPortalForm : Form
                 canUse ? Accent : Color.FromArgb(63, 78, 100), 100, 50);
             button.Dock = DockStyle.Fill; button.Enabled = canUse && !(app?.IsCatalogue == true && app.InstalledRequestId > 0 && !app.InstalledApproved);
             if (app != null)
-                button.Click += async (_, _) => { if (app.IsCatalogue && app.InstalledApproved) await LaunchInstalledAsync(app, button);
-                    else if (app.IsCatalogue && app.PackageStatus == "detecting") await ChooseInstalledAsync(app, button);
-                    else if (app.IsCatalogue) await InstallCatalogueAsync(app, button); else await LaunchAsync(app, button); };
+            {
+                button.Click += async (_, _) => await PrimaryActionAsync(app, button);
+                currentPrimaryButton = button;
+                currentPrimaryStatus = statusLabel;
+                currentPrimaryAppId = app.Id;
+            }
             var actionPanel = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2 };
             actionPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 55));
             actionPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
@@ -338,35 +358,142 @@ public sealed class AppPortalForm : Form
                 var remove = ButtonFor("Uninstall game…", Color.FromArgb(116, 54, 62), 100, 36);
                 remove.Dock = DockStyle.Fill;
                 remove.Click += async (_, _) => await UninstallCatalogueAsync(app, remove);
+                currentUninstallButton = remove;
                 actionPanel.Controls.Add(remove, 0, 1);
             }
             content.Controls.Add(actionPanel, 0, 5);
             detailPane.Controls.Add(content);
+            RefreshGameStates();
         }
         finally { detailPane.ResumeLayout(); }
     }
 
+    private static bool CanLaunch(PortalApplication app) => app.IsCatalogue
+        ? app.InstalledApproved && app.PackageStatus != "uninstalled" &&
+          app.InstalledRequestId > 0 && !string.IsNullOrWhiteSpace(app.InstalledPath)
+        : app.Status == "approved" && !string.IsNullOrWhiteSpace(app.FilePath);
+
+    private static string LaunchPath(PortalApplication app) => app.IsCatalogue ? app.InstalledPath : app.FilePath;
+
+    private async Task PrimaryActionAsync(PortalApplication app, Button button)
+    {
+        if (CanLaunch(app))
+        {
+            var path = LaunchPath(app);
+            var state = gameProcesses.StateFor(path);
+            if (state == GameProcessTracker.GameState.Running)
+                await StopGameAsync(app);
+            else if (state == GameProcessTracker.GameState.Ready)
+            {
+                if (app.IsCatalogue) await LaunchInstalledAsync(app, button);
+                else await LaunchAsync(app, button);
+            }
+            return;
+        }
+        if (app.IsCatalogue && app.PackageStatus == "detecting") await ChooseInstalledAsync(app, button);
+        else if (app.IsCatalogue) await InstallCatalogueAsync(app, button);
+    }
+
+    private void RefreshGameStates()
+    {
+        if (IsDisposed || Disposing) return;
+        foreach (var app in apps)
+        {
+            if (!CanLaunch(app)) continue;
+            var state = gameProcesses.StateFor(LaunchPath(app));
+            var tile = posterGrid.Controls.OfType<Panel>().FirstOrDefault(x => x.Tag is int id && id == app.Id);
+            var status = tile?.Controls.OfType<Label>().FirstOrDefault(x => x.Name == "tile-status");
+            if (status is not null && !status.IsDisposed)
+            {
+                var caption = state switch
+                {
+                    GameProcessTracker.GameState.Starting => "◷ Starting…",
+                    GameProcessTracker.GameState.Running => "● Running",
+                    GameProcessTracker.GameState.Stopping => "◷ Stopping…",
+                    _ => "✓ Ready to play"
+                };
+                if (status.Text != caption) status.Text = caption;
+                status.ForeColor = state == GameProcessTracker.GameState.Running ? Green :
+                    state == GameProcessTracker.GameState.Ready ? Green : Amber;
+            }
+            if (currentPrimaryAppId != app.Id || currentPrimaryButton is null || currentPrimaryButton.IsDisposed) continue;
+            var captionButton = state switch
+            {
+                GameProcessTracker.GameState.Starting => "◷  STARTING…",
+                GameProcessTracker.GameState.Running => "■  STOP GAME",
+                GameProcessTracker.GameState.Stopping => "◷  STOPPING…",
+                _ => "▶  PLAY"
+            };
+            if (currentPrimaryButton.Text != captionButton) currentPrimaryButton.Text = captionButton;
+            currentPrimaryButton.Enabled = state is GameProcessTracker.GameState.Ready or GameProcessTracker.GameState.Running;
+            currentPrimaryButton.BackColor = state == GameProcessTracker.GameState.Running ?
+                Color.FromArgb(154, 66, 76) : state == GameProcessTracker.GameState.Ready ? Accent : Surface;
+            if (currentUninstallButton is not null && !currentUninstallButton.IsDisposed)
+                currentUninstallButton.Enabled = state == GameProcessTracker.GameState.Ready && !installing;
+            if (currentPrimaryStatus is not null && !currentPrimaryStatus.IsDisposed)
+            {
+                currentPrimaryStatus.Text = state switch
+                {
+                    GameProcessTracker.GameState.Starting => "◷ Starting game…",
+                    GameProcessTracker.GameState.Running => "● Game is running",
+                    GameProcessTracker.GameState.Stopping => "◷ Closing game…",
+                    _ => "✓ Ready to play"
+                };
+                currentPrimaryStatus.ForeColor = state == GameProcessTracker.GameState.Running ? Green :
+                    state == GameProcessTracker.GameState.Ready ? Green : Amber;
+            }
+        }
+    }
+
+    private async Task StopGameAsync(PortalApplication app)
+    {
+        var path = LaunchPath(app);
+        if (gameProcesses.StateFor(path) != GameProcessTracker.GameState.Running) return;
+        if (MessageBox.Show(this,
+            $"Force close {app.DisplayName}?\n\nAny unsaved progress may be lost.",
+            "Stop game", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
+        if (!gameProcesses.TryBeginStop(path)) { RefreshGameStates(); return; }
+        RefreshGameStates();
+        try
+        {
+            var count = await Task.Run(() => gameProcesses.ForceStop(path));
+            footer.Text = count > 0 ? $"Closed {app.DisplayName}." : "The game already closed.";
+        }
+        catch (Exception e) { footer.Text = "Could not stop the game: " + e.Message; }
+        finally { gameProcesses.EndStop(path); RefreshGameStates(); }
+    }
+
     private async Task LaunchAsync(PortalApplication app, Button button)
     {
-        button.Enabled = false;
+        if (!gameProcesses.TryBeginLaunch(app.FilePath)) { RefreshGameStates(); return; }
+        RefreshGameStates();
         try
         {
             var candidate = await ApplicationCandidate.ScanAsync(app.FilePath);
             using var check = await http.PostAsJsonAsync($"agent/applications/{app.Id}/verify", candidate);
             await RequireSuccess(check);
+            // The game might have been started outside HomeWatch while verification
+            // was in flight. Never spawn a second copy in that case.
+            if (gameProcesses.StateFor(app.FilePath) == GameProcessTracker.GameState.Running)
+            {
+                footer.Text = "This game is already running.";
+                return;
+            }
             using var process = Process.Start(new ProcessStartInfo(app.FilePath)
             {
                 UseShellExecute = true, WorkingDirectory = Path.GetDirectoryName(app.FilePath) ?? ""
             });
-            footer.Text = "Have fun! 🎮";
+            if (process is null) throw new IOException("Windows did not start the application");
+            footer.Text = "Starting your game… 🎮";
             await ReportLaunchAsync(app.Id, "started", "Started as the current Windows user");
         }
         catch (Exception e)
         {
+            gameProcesses.CancelLaunch(app.FilePath);
             footer.Text = "Could not open the app: " + e.Message;
             await ReportLaunchAsync(app.Id, "failed", e.Message);
         }
-        finally { if (!IsDisposed) button.Enabled = true; }
+        finally { RefreshGameStates(); }
     }
 
     private async Task InstallationStateAsync(int id, string status, string installed = "", string executable = "",
@@ -380,24 +507,31 @@ public sealed class AppPortalForm : Form
 
     private async Task LaunchInstalledAsync(PortalApplication app, Button button)
     {
-        button.Enabled = false;
+        if (!gameProcesses.TryBeginLaunch(app.InstalledPath)) { RefreshGameStates(); return; }
+        RefreshGameStates();
         try
         {
             var candidate = await ApplicationCandidate.ScanAsync(app.InstalledPath);
             using var response = await http.PostAsJsonAsync($"agent/applications/{app.InstalledRequestId}/verify", candidate);
             await RequireSuccess(response);
+            if (gameProcesses.StateFor(app.InstalledPath) == GameProcessTracker.GameState.Running)
+            {
+                footer.Text = "This game is already running.";
+                return;
+            }
             using var process = Process.Start(new ProcessStartInfo(app.InstalledPath)
                 { UseShellExecute = true, WorkingDirectory = Path.GetDirectoryName(app.InstalledPath) ?? "" });
             if (process is null) throw new IOException("Unable to start the installed game");
             await ReportLaunchAsync(app.InstalledRequestId, "started", "Opened from HomeWatch family library");
-            footer.Text = "Have fun! 🎮";
+            footer.Text = "Starting your game… 🎮";
         }
         catch (Exception e)
         {
+            gameProcesses.CancelLaunch(app.InstalledPath);
             footer.Text = "Game launch was blocked: " + e.Message;
             await ReportLaunchAsync(app.InstalledRequestId, "failed", e.Message);
         }
-        finally { if (!IsDisposed) button.Enabled = true; }
+        finally { RefreshGameStates(); }
     }
 
     private async Task ChooseInstalledAsync(PortalApplication app, Button button)
@@ -446,6 +580,11 @@ public sealed class AppPortalForm : Form
     {
         if (!app.IsCatalogue || app.CatalogueId <= 0 || installing ||
             app.PackageStatus == "uninstalled" || string.IsNullOrWhiteSpace(app.InstalledPath)) return;
+        if (gameProcesses.StateFor(app.InstalledPath) != GameProcessTracker.GameState.Ready)
+        {
+            footer.Text = "Close the game before uninstalling it.";
+            return;
+        }
         string exe = app.InstalledPath;
         if (!File.Exists(exe))
         {
