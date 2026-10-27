@@ -743,7 +743,7 @@ public sealed class AppPortalForm : Form
         if (MessageBox.Show(this, $"Install {app.DisplayName}?\n\n" +
             $"Package size: {item.TotalBytes / (1024.0 * 1024 * 1024):F2} GB\n" +
             "HomeWatch will copy and verify the complete NAS package. " +
-            (item.ElevateInstaller ? "Your parent has authorised elevated setup; Windows will request administrator approval." : "The installer may still request an administrator password."),
+            (item.ElevateInstaller ? "Your parent has authorised this installer. The local broker will launch it as administrator without asking for credentials." : "The installer may still request an administrator password."),
             "Install game", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
         installing = true;
         button.Enabled = false;
@@ -787,28 +787,38 @@ public sealed class AppPortalForm : Form
                 (File.GetAttributes(exe) & FileAttributes.ReparsePoint) != 0 ||
                 !await HashMatchesAsync(exe, entry.Sha256))
                 throw new IOException("Approved setup executable changed after staging. Installation blocked.");
-            // An independently validated, service-owned staging copy avoids
-            // elevated execution from the child-writable installer cache.
-            // This is staging ONLY: v0.5.9 still uses the ordinary UAC worker
-            // for the actual interactive administrator installation.
-            if (item.ElevateInstaller && InstallerBrokerClient.IsInstalled)
-            {
-                footer.Text = "Preparing an administrator-protected copy of your installer…";
-                exe = await InstallerBrokerClient.PrepareAsync(item.Id, cancel.Token);
-            }
             await InstallationStateAsync(item.Id, "installing");
             var before = HouseholdPackageInstaller.UninstallLocations();
-            footer.Text = "Installer open — follow the normal Windows setup wizard.";
-            using var process = item.ElevateInstaller ? RuntimeBroker.Start("installer", item.Id, exe) :
-                Process.Start(new ProcessStartInfo(exe)
+            int installerExit;
+            if (item.ElevateInstaller)
+            {
+                if (!InstallerBrokerClient.IsInstalled)
+                    throw new IOException("The signed v0.6.0 installer broker is not installed. Run the v0.6.0 Windows installer as administrator once.");
+                // Never execute the child-writable cache with elevated privileges.
+                // The service independently fetches permission, verifies the
+                // complete package, and runs from a protected Program Files copy.
+                footer.Text = "Requesting your parent's approved administrator installation…";
+                installerExit = await InstallerBrokerClient.InstallElevatedAsync(item.Id, status =>
+                {
+                    if (!IsDisposed) footer.Text = status;
+                }, cancel.Token);
+            }
+            else
+            {
+                footer.Text = "Installer open — follow the normal Windows setup wizard.";
+                using var process = Process.Start(new ProcessStartInfo(exe)
                 {
                     UseShellExecute = true, WorkingDirectory = Path.GetDirectoryName(exe) ?? ""
-                });
-            if (process is null) throw new IOException("Windows could not launch the installer");
-            auditStatus = "started"; auditDetail = item.ElevateInstaller ? "Administrator-approved interactive installer (UAC)" : "Interactive installer started as logged-in user";
-            await process.WaitForExitAsync();
-            if (process.ExitCode != 0)
-                throw new IOException("Installer exited with code " + process.ExitCode);
+                }) ?? throw new IOException("Windows could not launch the installer");
+                await process.WaitForExitAsync();
+                installerExit = process.ExitCode;
+            }
+            auditStatus = "started";
+            auditDetail = item.ElevateInstaller
+                ? "Broker-authorised interactive installer using dedicated local administrator"
+                : "Interactive installer started as logged-in user";
+            if (installerExit != 0)
+                throw new IOException("Installer exited with code " + installerExit);
             await InstallationStateAsync(item.Id, "detecting");
             footer.Text = "Setup closed. Looking for the new game…";
             // A parent-reviewed path can locate games buried several folders deep.

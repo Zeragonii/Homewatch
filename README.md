@@ -1,3 +1,9 @@
+# HomeWatch v0.6.0 — interactive installer elevation
+
+Parent-authorised household software installations can now run their **normal GUI installer elevated without requesting the child's administrator password**. The dedicated, pinned-HTTPS installer broker uses a locally provisioned administrator identity; no SYSTEM GUI, arbitrary command runner, or change to the signed three-file updater. **Requires a one-time administrator-run Windows installer upgrade and local broker enrolment.** Read [RELEASE-v0.6.0.md](RELEASE-v0.6.0.md) before enabling it, including the delegated administrator privilege implications and first-client test procedure.
+
+---
+
 # HomeWatch v0.4.3 — Service repair and updater diagnostics
 
 See [RELEASE-v0.4.3.md](RELEASE-v0.4.3.md) for verification and recovery.

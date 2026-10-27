@@ -20,39 +20,24 @@ internal static class InstallerBrokerClient
             Arguments = "--enrol", WorkingDirectory = AppContext.BaseDirectory });
     }
 
-    internal static async Task<string> PrepareAsync(int catalogueId, CancellationToken cancellation)
+    private static async Task<string> RequestAsync(string request, CancellationToken cancellation)
     {
-        if (catalogueId <= 0) throw new ArgumentException("Invalid catalogue ID");
-        // Broker connection is a single request/reply. The protocol never takes
-        // executable paths, command lines, or a destination from the user.
         using var pipe = new NamedPipeClientStream(".", "HomeWatchInstallerBroker",
             PipeDirection.InOut, PipeOptions.Asynchronous, TokenImpersonationLevel.Impersonation);
         try
         {
             await pipe.ConnectAsync(7000, cancellation);
-            // StreamReader/Writer must NOT own the underlying duplex pipe. Both
-            // remain alive until the response has been read completely.
-            using var writer = new StreamWriter(pipe, new System.Text.UTF8Encoding(false),
-                bufferSize: 1024, leaveOpen: true) { AutoFlush = true };
+            using var writer = new StreamWriter(pipe, new System.Text.UTF8Encoding(false), 1024, leaveOpen: true)
+                { AutoFlush = true };
             using var reader = new StreamReader(pipe, System.Text.Encoding.UTF8,
                 detectEncodingFromByteOrderMarks: false, bufferSize: 1024, leaveOpen: true);
-            await writer.WriteLineAsync(catalogueId.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            await writer.WriteLineAsync(request);
             string? reply = await reader.ReadLineAsync(cancellation);
-            if (reply is null)
-                throw new EndOfStreamException("The installer broker disconnected without sending a reply");
-            if (reply.Length > 2500)
-                throw new IOException("Installer broker returned an oversized reply");
+            if (reply is null) throw new EndOfStreamException("Broker disconnected before replying");
+            if (reply.Length > 2500) throw new IOException("Broker returned an oversized response");
             if (reply.StartsWith("ERROR ", StringComparison.Ordinal))
                 throw new BrokerRejectionException(reply[6..]);
-            if (!reply.StartsWith("OK ", StringComparison.Ordinal))
-                throw new IOException("Installer broker returned an unexpected response");
-            // Never trust a pipe path without the precise broker-owned staging prefix.
-            string location = Path.GetFullPath(reply[3..]);
-            var baseDir = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory,
-                ".installer-broker", "staged")) + Path.DirectorySeparatorChar;
-            if (!location.StartsWith(baseDir, StringComparison.OrdinalIgnoreCase) ||
-                !File.Exists(location)) throw new IOException("Broker returned an invalid staging path");
-            return location;
+            return reply;
         }
         catch (BrokerRejectionException ex)
         {
@@ -61,14 +46,52 @@ internal static class InstallerBrokerClient
         catch (IOException ex) when (ex is not BrokerRejectionException)
         {
             throw new IOException("Installer broker connection failed: " + ex.Message +
-                ". Check HomeWatchInstallerBroker service status and the broker audit log in " +
+                ". Check the service and broker audit log at " +
                 @"C:\Program Files\HomeWatch\.installer-broker\audit.log", ex);
         }
-        catch (ObjectDisposedException ex)
+    }
+
+    internal static async Task<int> InstallElevatedAsync(int catalogueId, Action<string> progress,
+        CancellationToken cancellation)
+    {
+        if (catalogueId <= 0) throw new ArgumentException("Invalid catalogue ID");
+        // A child can grant desktop access to ONLY the specific broker-created
+        // account; the account SID is independently obtained from the local service.
+        string identity = await RequestAsync("IDENTITY", cancellation);
+        if (!identity.StartsWith("ID S-1-5-21-", StringComparison.Ordinal))
+            throw new IOException("Broker has no provisioned administrator identity. Open Installer broker setup as administrator.");
+        InstallerDesktopAccess.AllowRunner(identity[3..]);
+        progress("Verifying protected package and starting approved administrator installer…");
+        string reply = await RequestAsync("RUN " + catalogueId, cancellation);
+        if (!reply.StartsWith("STARTED ", StringComparison.Ordinal) ||
+            !Guid.TryParseExact(reply[8..], "N", out _))
+            throw new IOException("Broker did not confirm elevated installer launch: " + reply);
+        string ticket = reply[8..];
+        progress("Elevated installer is open — follow the setup wizard.");
+        while (true)
         {
-            throw new IOException("Installer broker closed its connection unexpectedly. Check the broker audit log in " +
-                @"C:\Program Files\HomeWatch\.installer-broker\audit.log", ex);
+            // Polling is independent of the original IPC connection, allowing
+            // the broker to serve the status of other installations concurrently.
+            await Task.Delay(2000, cancellation);
+            string state = await RequestAsync("STATUS " + ticket, cancellation);
+            if (state == "RUNNING") continue;
+            if (state.StartsWith("EXIT ", StringComparison.Ordinal) &&
+                int.TryParse(state[5..], out int exit)) return exit;
+            throw new IOException("Unexpected elevated installer status: " + state);
         }
+    }
+
+    internal static async Task<string> PrepareAsync(int catalogueId, CancellationToken cancellation)
+    {
+        if (catalogueId <= 0) throw new ArgumentException("Invalid catalogue ID");
+        string reply = await RequestAsync(catalogueId.ToString(System.Globalization.CultureInfo.InvariantCulture), cancellation);
+        if (!reply.StartsWith("OK ", StringComparison.Ordinal)) throw new IOException("Unexpected staging response");
+        string location = Path.GetFullPath(reply[3..]);
+        var baseDir = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory,
+            ".installer-broker", "staged")) + Path.DirectorySeparatorChar;
+        if (!location.StartsWith(baseDir, StringComparison.OrdinalIgnoreCase) || !File.Exists(location))
+            throw new IOException("Broker returned an invalid staging path");
+        return location;
     }
 
     private sealed class BrokerRejectionException : IOException

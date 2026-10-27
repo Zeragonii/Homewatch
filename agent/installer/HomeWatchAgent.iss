@@ -1,5 +1,5 @@
 #ifndef MyAppVersion
-  #define MyAppVersion "0.5.9.3"
+  #define MyAppVersion "0.6.0"
 #endif
 #define MyAppName "HomeWatch Launcher"
 #define MyAppPublisher "HomeWatch"
@@ -75,6 +75,9 @@ Name: "{autoprograms}\HomeWatch Launcher"; Filename: "{app}\{#MyAppExeName}"; Pa
 Name: "{commondesktop}\HomeWatch Launcher"; Filename: "{app}\{#MyAppExeName}"; Parameters: "--apps"; Tasks: myappsdesktop
 
 [UninstallRun]
+; Remove only the runner account that the broker itself enrolled and pinned.
+; If administrator cleanup fails, the uninstaller must surface the issue.
+Filename: "{app}\HomeWatchInstallerBroker.exe"; Parameters: "--remove-runner"; Flags: runhidden waituntilterminated; RunOnceId: "RemoveHomeWatchInstallRunner"; Check: RunnerConfigExists
 Filename: "{sys}\sc.exe"; Parameters: "stop HomeWatchInstallerBroker"; Flags: runhidden waituntilterminated; RunOnceId: "StopHomeWatchInstallerBroker"
 Filename: "{sys}\sc.exe"; Parameters: "delete HomeWatchInstallerBroker"; Flags: runhidden waituntilterminated; RunOnceId: "DeleteHomeWatchInstallerBroker"
 Filename: "{sys}\sc.exe"; Parameters: "stop HomeWatchUpdaterService"; Flags: runhidden waituntilterminated; RunOnceId: "StopHomeWatchService"
@@ -102,6 +105,11 @@ begin
       'then run this installer again. Your device enrolment is kept in ' +
       'C:\ProgramData\HomeWatch\config.json (back this file up first).',
       mbCriticalError, MB_OK);
+end;
+
+function RunnerConfigExists(): Boolean;
+begin
+  Result := FileExists(ExpandConstant('{app}\.installer-broker\runner-identity.json'));
 end;
 
 function BrokerServiceInstalled(): Boolean;

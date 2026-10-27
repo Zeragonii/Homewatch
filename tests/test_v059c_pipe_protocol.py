@@ -21,7 +21,7 @@ def test_broker_opens_writer_before_read_and_identity_checks():
     assert 'await writer.WriteLineAsync("ERROR "' in source
     assert 'requestTimeout.CancelAfter(TimeSpan.FromSeconds(20))' in source
     assert 'pipe.RunAsClient(' in source
-    assert 'int.TryParse(line, out id)' in source
+    assert 'int.TryParse(catalogue, out id)' in source
     assert 'BrokerSettings.Audit("denied catalogue="' in source
 
 
@@ -30,4 +30,4 @@ def test_service_side_broker_update_requires_installer():
     assert 'Source: "..\\..\\out\\agent\\HomeWatchInstallerBroker.exe"' in iss
     assert "@('HomeWatchAgent.exe', 'HomeWatchService.exe', 'HomeWatchUpdater.exe')" in WORKFLOW
     assert 'HomeWatchInstallerBroker.exe' in WORKFLOW
-    assert "'0.5.9.3'" in WORKFLOW
+    assert "'0.6.0'" in WORKFLOW

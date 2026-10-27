@@ -253,14 +253,14 @@ async function setGameElevation(digest,enabled){
   }catch(e){alert(e.message)}
 }
 async function setInstallerElevation(id,enabled){
-  if(enabled&&!confirm('Allow this exact published installer package to request administrator elevation on all clients? Windows UAC remains required.'))return;
+  if(enabled&&!confirm('Allow this exact installer package to run with administrator privileges on enrolled PCs? HomeWatch v0.6.0 can open its interactive wizard WITHOUT another UAC prompt. The installer will have broad administrator access, so approve only packages you trust.'))return;
   try{await api(`/api/catalogue/${id}/elevation`,{method:'PUT',body:JSON.stringify({enabled})});
     lastCatalogueSnapshot='';await loadCatalogue(true);
   }catch(e){alert(e.message)}
 }
 async function revokeApplication(id){if(!confirm('Revoke this approval?'))return;try{await api(`/api/applications/approvals/${id}`,{method:'DELETE'});lastApplicationSnapshot='';await loadApplications(true)}catch(e){alert(e.message)}}
 
-// Centrally published installers. Each exact package has an independent parent-selected UAC elevation setting.
+// Centrally published installers. Each exact package has an independent parent-selected privileged broker setting.
 let lastCatalogueData={items:[],attempts:[]};
 let lastCatalogueSnapshot='';
 let editingCatalogueId=null;
@@ -277,7 +277,7 @@ async function loadCatalogue(force=false){
       <div class="meta">${a.launch_relative_path ? 'Shared launch path: <code>'+esc(a.launch_relative_path)+'</code> <button class="subtle-action" onclick="clearCatalogueLaunchHint('+a.id+')">Clear</button>' : 'No approved shared launch path yet'} <button class="subtle-action" onclick="editCatalogueLaunchPath(${a.id})">Set path</button></div></td>
       <td class="catalogue-source"><div class="meta">${esc(a.installer_path)}</div><span class="fingerprint">SHA-256 ${esc(a.installer_sha256.substring(0,18))}…</span></td>
       <td>${a.enabled?'<span class="online">Published</span>':'<span class="offline">Hidden</span>'}</td>
-      <td><div class="catalogue-row-actions"><button class="secondary" onclick="setInstallerElevation(${a.id},${!a.elevate_installer})">${a.elevate_installer?'Disable elevation':'Allow elevation (UAC)'}</button><button class="secondary" onclick="openCatalogueEditor(${a.id})">Edit</button>${a.enabled?`<button class="warn" onclick="unpublishCatalogueItem(${a.id})">Unpublish</button>`:''}</div></td>
+      <td><div class="catalogue-row-actions"><button class="secondary" onclick="setInstallerElevation(${a.id},${!a.elevate_installer})">${a.elevate_installer?'Disable broker elevation':'Allow broker elevation'}</button><button class="secondary" onclick="openCatalogueEditor(${a.id})">Edit</button>${a.enabled?`<button class="warn" onclick="unpublishCatalogueItem(${a.id})">Unpublish</button>`:''}</div></td>
     </tr>`).join('')}</tbody></table>`:'<div class="app-empty">Nothing published yet. Add your first NAS installer.</div>';
     const pendingHints=(data.launch_suggestions||[]).map(h=>{
       const app=data.items.find(x=>x.id===h.catalogue_id);

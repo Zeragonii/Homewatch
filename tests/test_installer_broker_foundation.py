@@ -20,7 +20,7 @@ def test_three_binary_updater_still_unchanged():
 
 
 def test_narrow_pipe_input_and_server_authorisation():
-    assert 'int.TryParse(line, out id)' in BROKER
+    assert 'int.TryParse(catalogue, out id)' in BROKER
     assert 'agent/elevation/installer/{id}' in BROKER
     assert 'pipe.RunAsClient(' in BROKER
     assert 'file.GetProperty("sha256")' in BROKER
@@ -39,9 +39,9 @@ def test_broker_requires_credential_protected_https_pin():
 
 
 def test_user_cannot_supply_paths_or_args_to_service():
-    assert 'WriteLineAsync(catalogueId.ToString(' in CLIENT
+    assert 'RequestAsync("RUN " + catalogueId' in CLIENT
     assert 'InstallAsync(item' in AGENT
-    assert 'InstallerBrokerClient.PrepareAsync(item.Id' in AGENT
+    assert 'InstallerBrokerClient.InstallElevatedAsync(item.Id' in AGENT
     runtime = (ROOT/'agent/HomeWatchAgent/RuntimeBroker.cs').read_text()
     assert 'configPath = Path.Combine(AppContext.BaseDirectory, ".installer-broker", "broker-config.json")' in runtime
     assert 'Verb = "runas"' in runtime

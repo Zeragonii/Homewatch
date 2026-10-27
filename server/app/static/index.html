@@ -114,7 +114,7 @@
     <label>Existing SHA-256<input id="catalogueHash" maxlength="64" placeholder="64-character SHA-256"></label></details>
     <label>Note for children (optional)<textarea id="catalogueDescription" maxlength="600" rows="2" placeholder="Install this before trying to play."></textarea></label>
     <label class="toggle"><input type="checkbox" id="catalogueEnabled" checked> Available to every enrolled device</label>
-    <p class="muted small">HomeWatch hashes every package file before publication. Windows clients stage and verify the complete package; per-package administrator elevation is configured separately in the catalogue and still prompts for Windows UAC approval.</p>
+    <p class="muted small">HomeWatch hashes every package file before publication. Windows clients stage and verify the complete package; per-package administrator elevation is configured separately. On provisioned v0.6.0 clients, an approved installer opens elevated through the dedicated broker without another UAC prompt. Older clients may still request UAC.</p>
     <p id="catalogueFeedback" class="error small" role="status"></p>
     <div class="row" style="justify-content:flex-end"><button type="button" class="secondary" onclick="document.getElementById('catalogueEditor').close()">Cancel</button><button id="catalogueSaveButton" type="submit">Save entry</button></div>
   </form>

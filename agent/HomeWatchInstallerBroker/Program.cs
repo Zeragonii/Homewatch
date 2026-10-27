@@ -13,9 +13,8 @@ using System.Net.Http.Headers;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 
-// A separate privileged *staging* service. This service deliberately never
-// starts interactive executables and never exposes a generic command runner.
-// Interactive password-free execution is NOT implemented in this milestone.
+// Dedicated installer broker: parent-approved, hash-verified packages only.
+// Interactive execution uses a dedicated local administrator account, NEVER SYSTEM.
 if (args.Length == 1 && args[0] == "--enrol")
 {
     try
@@ -31,6 +30,11 @@ if (args.Length == 1 && args[0] == "--enrol")
             "HomeWatch installer broker", 0x10);
         Environment.ExitCode = 1;
     }
+    return;
+}
+if (args.Length == 1 && args[0] == "--remove-runner")
+{
+    RunnerIdentity.Remove();
     return;
 }
 var builder = Host.CreateApplicationBuilder(args);
@@ -90,7 +94,7 @@ internal static class BrokerSettings
             "Approve HomeWatch broker enrolment for this server?\n\n" +
             url + "\n\nDevice ID: " + id +
             "\n\nThis will be pinned for all future protected installer requests.",
-            "HomeWatch installer broker — verify server", 0x34) != 6)
+            "HomeWatch installer broker — verify server", 0x24) != 6)
             throw new OperationCanceledException("Administrator declined server enrolment");
         using var http = new HttpClient { BaseAddress = new Uri(url.TrimEnd('/') + "/"), Timeout = TimeSpan.FromSeconds(15) };
         http.DefaultRequestHeaders.Add("X-Device-ID", id);
@@ -122,8 +126,36 @@ internal static class BrokerSettings
             File.Move(tmp, Config, true);
         }
         finally { if (File.Exists(tmp)) File.Delete(tmp); }
+        // Both trust decisions occur only during this locally elevated setup.
+        if (!File.Exists(RunnerIdentity.FilePath))
+        {
+            if (User32.MessageBox(IntPtr.Zero,
+                "Enable password-free interactive installations for parent-approved packages?\n\n" +
+                "HomeWatch will create a dedicated LOCAL ADMINISTRATOR account with a random secret " +
+                "that stays encrypted on this PC. Approved installer windows will be fully elevated " +
+                "and can make unrestricted administrator-level changes to Windows.\n\n" +
+                "Only use this with packages you personally trust. This is not a sandbox.\n\n" +
+                "Create the dedicated administrator identity?",
+                "HomeWatch — approve installer privileges", 0x24) != 6)
+                throw new OperationCanceledException("Administrator did not approve password-free installation");
+        }
+        RunnerIdentity.Provision();
         Console.WriteLine("Installer broker registered for " + uri.Host + " and enrolled device " + id);
     }
+    internal static void LockDownFile(string filename)
+    {
+        var acl = new ProcessStartInfo(Path.Combine(Environment.SystemDirectory, "icacls.exe"))
+            { UseShellExecute = false, CreateNoWindow = true };
+        acl.ArgumentList.Add(filename);
+        acl.ArgumentList.Add("/inheritance:r");
+        acl.ArgumentList.Add("/grant:r");
+        acl.ArgumentList.Add("*S-1-5-18:F");
+        acl.ArgumentList.Add("*S-1-5-32-544:F");
+        using var process = Process.Start(acl) ?? throw new IOException("Cannot secure broker identity ACL");
+        process.WaitForExit();
+        if (process.ExitCode != 0) throw new IOException("Could not secure broker identity permissions");
+    }
+
     internal static void Audit(string message)
     {
         try { Directory.CreateDirectory(Root);
@@ -134,6 +166,45 @@ internal static class BrokerSettings
 
 internal sealed class BrokerWorker(ILogger<BrokerWorker> log) : BackgroundService
 {
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, InstallationRun> Runs = new();
+    private static readonly SemaphoreSlim LaunchLock = new(1, 1);
+    private sealed class InstallationRun
+    {
+        internal required string Sid { get; init; }
+        internal required uint Session { get; init; }
+        internal volatile bool Complete;
+        internal int ExitCode;
+        internal DateTimeOffset Created = DateTimeOffset.UtcNow;
+    }
+    private static async Task MonitorAsync(string ticket, RunnerIdentity.LaunchedInstaller installed, string stagedExe)
+    {
+        try
+        {
+            using (installed)
+            {
+                int code = await Task.Run(installed.WaitForExit);
+                if (Runs.TryGetValue(ticket, out var state)) { state.ExitCode = code; state.Complete = true; }
+                BrokerSettings.Audit("installer-exit ticket=" + ticket + " code=" + code);
+            }
+        }
+        catch (Exception ex)
+        {
+            if (Runs.TryGetValue(ticket, out var state)) { state.ExitCode = -1; state.Complete = true; }
+            BrokerSettings.Audit("installer-monitor-error ticket=" + ticket + " " + ex.Message);
+        }
+        finally
+        {
+            _ = Task.Run(async () =>
+            {
+                // Installers may spawn helpers that continue reading their
+                // package after the main wizard exits: allow a grace period.
+                await Task.Delay(TimeSpan.FromMinutes(40));
+                Runs.TryRemove(ticket, out _);
+                try { CleanupStage(stagedExe); }
+                catch (Exception error) { BrokerSettings.Audit("stage-cleanup-failed " + error.Message); }
+            });
+        }
+    }
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         // Fail closed on an unconfigured machine: do not accidentally trust the
@@ -150,13 +221,18 @@ internal sealed class BrokerWorker(ILogger<BrokerWorker> log) : BackgroundServic
                     PipeAccessRights.FullControl, AccessControlType.Allow));
                 security.AddAccessRule(new PipeAccessRule(new SecurityIdentifier(WellKnownSidType.AuthenticatedUserSid, null),
                     PipeAccessRights.ReadWrite, AccessControlType.Allow));
-                using var pipe = NamedPipeServerStreamAcl.Create(BrokerSettings.Pipe, PipeDirection.InOut,
+                var pipe = NamedPipeServerStreamAcl.Create(BrokerSettings.Pipe, PipeDirection.InOut,
                     NamedPipeServerStream.MaxAllowedServerInstances, PipeTransmissionMode.Byte,
                     PipeOptions.Asynchronous, 4096, 4096, security);
                 await pipe.WaitForConnectionAsync(stoppingToken);
                 // One request per connection. No request supplies executable path,
                 // arguments, destination or administrative commands.
-                await HandleAsync(pipe, stoppingToken, log);
+                // Stage operations can involve hundreds of GB. Keep accepting
+                // other status requests while one installation is running.
+                _ = Task.Run(async () =>
+                {
+                    using (pipe) await HandleAsync(pipe, stoppingToken, log);
+                }, CancellationToken.None);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { return; }
             catch (Exception e) { log.LogWarning("Rejected installer staging request: {Error}", e.Message);
@@ -180,7 +256,7 @@ internal sealed class BrokerWorker(ILogger<BrokerWorker> log) : BackgroundServic
             // forever without sending a complete catalogue identifier.
             using var requestTimeout = CancellationTokenSource.CreateLinkedTokenSource(stop);
             requestTimeout.CancelAfter(TimeSpan.FromSeconds(20));
-            var request = new byte[24];
+            var request = new byte[96];
             int bytes = 0;
             while (bytes < request.Length)
             {
@@ -204,11 +280,52 @@ internal sealed class BrokerWorker(ILogger<BrokerWorker> log) : BackgroundServic
             }
             if (!Regex.IsMatch(sid, @"^S-1-5-21-(\d+-){3}\d+$"))
                 throw new UnauthorizedAccessException("Installer requests require a local Windows account");
-            if (!int.TryParse(line, out id) || id <= 0)
-                throw new IOException("Only a positive catalogue identifier is accepted");
-            var entry = await StageApprovedAsync(sid, id, stop);
-            await writer.WriteLineAsync("OK " + entry);
-            BrokerSettings.Audit("approved-stage catalogue=" + id + " sid=" + sid);
+            if (line == "IDENTITY")
+            {
+                await writer.WriteLineAsync("ID " + RunnerIdentity.Sid);
+                return;
+            }
+            if (line.StartsWith("STATUS ", StringComparison.Ordinal))
+            {
+                string ticket = line[7..];
+                if (!Guid.TryParseExact(ticket, "N", out _) || !Runs.TryGetValue(ticket, out var state) || state.Sid != sid)
+                    throw new UnauthorizedAccessException("Installer operation does not belong to this account");
+                await writer.WriteLineAsync(state.Complete ? "EXIT " + state.ExitCode : "RUNNING");
+                return;
+            }
+            bool execute = line.StartsWith("RUN ", StringComparison.Ordinal);
+            var catalogue = execute ? line[4..] : line;
+            if (!int.TryParse(catalogue, out id) || id <= 0)
+                throw new IOException("Only a positive approved catalogue identifier is accepted");
+            if (!execute)
+            {
+                string prepared = await StageApprovedAsync(sid, id, stop);
+                await writer.WriteLineAsync("OK " + prepared);
+                BrokerSettings.Audit("approved-stage catalogue=" + id + " sid=" + sid);
+                return;
+            }
+            RunnerIdentity.EnsureSessionPrivilege();
+            if (!NativeSession.TryGetCallerSession(pipe, sid, out uint session))
+                throw new UnauthorizedAccessException("Installer launch requires the same active Windows user and session");
+            if (Runs.Values.Any(x => !x.Complete))
+                throw new IOException("An elevated installation is already active. Finish it before opening another.");
+            if (!await LaunchLock.WaitAsync(0, stop))
+                throw new IOException("An elevated installer is already being prepared; try again after it starts");
+            try
+            {
+                string entry = await StageApprovedAsync(sid, id, stop);
+                // Revoke permission before a long download completes: a
+                // second pinned-server policy check occurs IMMEDIATELY before launch.
+                await VerifyReadyToLaunchAsync(id, entry, stop);
+                RunnerIdentity.LaunchedInstaller installed = RunnerIdentity.Launch(entry, session);
+                string ticket = Guid.NewGuid().ToString("N");
+                Runs[ticket] = new InstallationRun { Sid = sid, Session = session };
+                _ = MonitorAsync(ticket, installed, entry);
+                await writer.WriteLineAsync("STARTED " + ticket);
+                BrokerSettings.Audit("approved-launch catalogue=" + id + " sid=" + sid +
+                    " session=" + session + " pid=" + installed.Pid + " ticket=" + ticket);
+            }
+            finally { LaunchLock.Release(); }
         }
         catch (OperationCanceledException) when (stop.IsCancellationRequested)
         {
@@ -236,6 +353,57 @@ internal sealed class BrokerWorker(ILogger<BrokerWorker> log) : BackgroundServic
             catch (IOException) { /* Client disconnected; original failure is logged. */ }
             catch (ObjectDisposedException) { /* Client disconnected. */ }
         }
+    }
+
+    private static async Task VerifyReadyToLaunchAsync(int id, string exe, CancellationToken stop)
+    {
+        var cfg = BrokerSettings.ReadConfig();
+        using var http = new HttpClient { BaseAddress = new Uri(cfg.ServerUrl.TrimEnd('/') + "/"),
+            Timeout = TimeSpan.FromSeconds(30) };
+        http.DefaultRequestHeaders.Add("X-Device-ID", cfg.DeviceId);
+        http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", cfg.DeviceToken);
+        using var response = await http.GetAsync($"agent/elevation/installer/{id}", stop);
+        if (!response.IsSuccessStatusCode)
+            throw new UnauthorizedAccessException("Parent withdrew elevated installer approval before launch");
+        using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync(stop));
+        var root = document.RootElement;
+        var entry = root.GetProperty("package_entrypoint").GetString() ?? "";
+        if (!SafeRelative(entry)) throw new IOException("Invalid approved setup entrypoint");
+        // The protected copy's root has id-sha256-random format.
+        string dir = Path.GetDirectoryName(exe)!;
+        foreach (var _ in entry.Split('\\').Skip(1)) dir = Path.GetDirectoryName(dir)!;
+        var digest = root.GetProperty("installer_sha256").GetString() ?? "";
+        if (!Path.GetFileName(dir).StartsWith(id + "-" + digest + "-", StringComparison.OrdinalIgnoreCase) ||
+            !Path.GetFullPath(Path.Combine(dir, entry)).Equals(exe, StringComparison.OrdinalIgnoreCase))
+            throw new IOException("Approved installer changed while staging");
+        var approved = root.GetProperty("manifest").GetProperty("files").EnumerateArray()
+            .FirstOrDefault(f => string.Equals(f.GetProperty("path").GetString(), entry,
+                StringComparison.OrdinalIgnoreCase));
+        if (approved.ValueKind == JsonValueKind.Undefined)
+            throw new IOException("Approved installer entrypoint missing");
+        var expectedHash = approved.GetProperty("sha256").GetString() ?? "";
+        if (!Regex.IsMatch(expectedHash, "^[a-f0-9]{64}$") ||
+            new FileInfo(exe).Length != approved.GetProperty("size").GetInt64())
+            throw new IOException("Approved setup executable size changed");
+        await using var stream = new FileStream(exe, FileMode.Open, FileAccess.Read, FileShare.Read);
+        var actual = Convert.ToHexString(await SHA256.HashDataAsync(stream, stop));
+        if (!actual.Equals(expectedHash, StringComparison.OrdinalIgnoreCase))
+            throw new IOException("Approved setup executable hash changed");
+    }
+
+    private static void CleanupStage(string stagedExe)
+    {
+        string root = Path.GetFullPath(BrokerSettings.Stage);
+        string relative = Path.GetRelativePath(root, stagedExe);
+        if (relative.StartsWith("..", StringComparison.Ordinal) || Path.IsPathRooted(relative)) return;
+        string folderName = relative.Split(Path.DirectorySeparatorChar)[0];
+        if (!Regex.IsMatch(folderName, @"^\d+-[a-f0-9]{64}-[a-f0-9]{32}$", RegexOptions.IgnoreCase)) return;
+        string directory = Path.GetFullPath(Path.Combine(root, folderName));
+        if (!directory.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) ||
+            !Directory.Exists(directory) ||
+            (File.GetAttributes(directory) & FileAttributes.ReparsePoint) != 0) return;
+        Directory.Delete(directory, recursive: true);
+        BrokerSettings.Audit("cleaned-stage " + folderName);
     }
 
     private static bool SafeRelative(string path) =>
@@ -286,7 +454,7 @@ internal sealed class BrokerWorker(ILogger<BrokerWorker> log) : BackgroundServic
         Directory.CreateDirectory(BrokerSettings.Stage);
         // Never let a logged-in user exhaust the drive by repeatedly requesting
         // staging of an already approved package. Cleanup is administrator-owned.
-        if (Directory.EnumerateDirectories(BrokerSettings.Stage).Take(5).Count() >= 5)
+        if (Directory.EnumerateDirectories(BrokerSettings.Stage).Take(25).Count() >= 25)
             throw new IOException("Protected staging is full; an administrator must remove old packages");
         long expectedTotal = files.Sum(file => file.GetProperty("size").GetInt64());
         if (expectedTotal > new DriveInfo(Path.GetPathRoot(BrokerSettings.Stage)!).AvailableFreeSpace - 1024L*1024*1024)
