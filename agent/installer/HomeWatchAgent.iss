@@ -1,5 +1,5 @@
 #ifndef MyAppVersion
-  #define MyAppVersion "0.5.8"
+  #define MyAppVersion "0.5.9"
 #endif
 #define MyAppName "HomeWatch Launcher"
 #define MyAppPublisher "HomeWatch"
@@ -38,12 +38,16 @@ RestartApplications=no
 Name: "{commonappdata}\HomeWatch"; Permissions: users-modify
 ; Update staging is kept under Program Files to inherit protected system ACLs.
 Name: "{app}\.updates"
+; Broker protected stage inherits Program Files ACLs, not user-modifiable ProgramData.
+Name: "{app}\.installer-broker"
+Name: "{app}\.installer-broker\staged"
 
 [Files]
 ; Explicit files ensure the installer build fails if any required binary is missing.
 Source: "..\..\out\agent\HomeWatchAgent.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\out\agent\HomeWatchService.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\out\agent\HomeWatchUpdater.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\..\out\agent\HomeWatchInstallerBroker.exe"; DestDir: "{app}"; Flags: ignoreversion
 
 [Run]
 Filename: "{sys}\sc.exe"; Parameters: "create HomeWatchUpdaterService binPath= ""{app}\HomeWatchService.exe"" start= auto"; Flags: runhidden waituntilterminated; Check: not ServiceInstalled
@@ -51,6 +55,9 @@ Filename: "{sys}\sc.exe"; Parameters: "create HomeWatchUpdaterService binPath= "
 ; may have been left configured for a previous installation directory.
 Filename: "{sys}\sc.exe"; Parameters: "config HomeWatchUpdaterService binPath= ""{app}\HomeWatchService.exe"" start= auto"; Flags: runhidden waituntilterminated; Check: ServiceInstalled
 Filename: "{sys}\sc.exe"; Parameters: "start HomeWatchUpdaterService"; Flags: runhidden waituntilterminated
+Filename: "{sys}\sc.exe"; Parameters: "create HomeWatchInstallerBroker binPath= ""{app}\HomeWatchInstallerBroker.exe"" start= auto"; Flags: runhidden waituntilterminated; Check: not BrokerServiceInstalled
+Filename: "{sys}\sc.exe"; Parameters: "config HomeWatchInstallerBroker binPath= ""{app}\HomeWatchInstallerBroker.exe"" start= auto"; Flags: runhidden waituntilterminated; Check: BrokerServiceInstalled
+Filename: "{sys}\sc.exe"; Parameters: "start HomeWatchInstallerBroker"; Flags: runhidden waituntilterminated
 Filename: "{app}\{#MyAppExeName}"; Description: "Launch HomeWatch Launcher for this Windows account"; Flags: nowait postinstall skipifsilent runasoriginaluser
 
 [Registry]
@@ -68,9 +75,15 @@ Name: "{autoprograms}\HomeWatch Launcher"; Filename: "{app}\{#MyAppExeName}"; Pa
 Name: "{commondesktop}\HomeWatch Launcher"; Filename: "{app}\{#MyAppExeName}"; Parameters: "--apps"; Tasks: myappsdesktop
 
 [UninstallRun]
+Filename: "{sys}\sc.exe"; Parameters: "stop HomeWatchInstallerBroker"; Flags: runhidden waituntilterminated; RunOnceId: "StopHomeWatchInstallerBroker"
+Filename: "{sys}\sc.exe"; Parameters: "delete HomeWatchInstallerBroker"; Flags: runhidden waituntilterminated; RunOnceId: "DeleteHomeWatchInstallerBroker"
 Filename: "{sys}\sc.exe"; Parameters: "stop HomeWatchUpdaterService"; Flags: runhidden waituntilterminated; RunOnceId: "StopHomeWatchService"
 Filename: "{sys}\sc.exe"; Parameters: "delete HomeWatchUpdaterService"; Flags: runhidden waituntilterminated; RunOnceId: "DeleteHomeWatchService"
 Filename: "{cmd}"; Parameters: "/C taskkill /IM HomeWatchAgent.exe /F >NUL 2>&1"; Flags: runhidden; RunOnceId: "StopHomeWatchAgent"
+
+[UninstallDelete]
+; Remove the broker's pinned machine credentials and staging files on uninstall.
+Type: filesandordirs; Name: "{app}\.installer-broker"
 
 [Code]
 // Upgrades from the old 32-bit-mode installer must remove the legacy install
@@ -91,6 +104,11 @@ begin
       mbCriticalError, MB_OK);
 end;
 
+function BrokerServiceInstalled(): Boolean;
+var ResultCode: Integer;
+begin
+  Result := Exec(ExpandConstant('{sys}\sc.exe'), 'query HomeWatchInstallerBroker', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) and (ResultCode = 0);
+end;
 function ServiceInstalled(): Boolean;
 var ResultCode: Integer;
 begin
@@ -105,6 +123,7 @@ begin
   begin
     // Avoid attempting to overwrite a running Windows service binary.
     Exec(ExpandConstant('{sys}\sc.exe'), 'stop HomeWatchUpdaterService', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    Exec(ExpandConstant('{sys}\sc.exe'), 'stop HomeWatchInstallerBroker', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
     Sleep(2000);
   end;
   if CurStep = ssPostInstall then

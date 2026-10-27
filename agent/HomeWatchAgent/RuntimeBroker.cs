@@ -40,6 +40,13 @@ internal static class RuntimeBroker
             if (!new WindowsPrincipal(identity).IsInRole(WindowsBuiltInRole.Administrator))
                 throw new UnauthorizedAccessException("Administrator approval is required for this action");
             var configPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "HomeWatch", "config.json");
+            // For files staged by the privileged broker, ignore writable
+            // machine configuration and use the locally admin-pinned server.
+            if (args[1] == "installer" && args.Length == 4 &&
+                Path.GetFullPath(args[3]).StartsWith(Path.GetFullPath(Path.Combine(AppContext.BaseDirectory,
+                    ".installer-broker", "staged")) + Path.DirectorySeparatorChar,
+                    StringComparison.OrdinalIgnoreCase))
+                configPath = Path.Combine(AppContext.BaseDirectory, ".installer-broker", "broker-config.json");
             var config = JsonSerializer.Deserialize<AgentConfig>(await File.ReadAllTextAsync(configPath))
                 ?? throw new IOException("HomeWatch device configuration is unavailable");
             if (string.IsNullOrWhiteSpace(config.DeviceId) || string.IsNullOrWhiteSpace(config.DeviceToken) ||
@@ -101,14 +108,34 @@ internal static class RuntimeBroker
         var packagePath = rootDir;
         for (int i = 0; i < entry.Split('\\').Length - 1; i++)
             packagePath = Path.GetDirectoryName(packagePath ?? "");
-        if (string.IsNullOrWhiteSpace(packagePath) ||
-            !string.Equals(Path.GetFileName(packagePath), packageFolder, StringComparison.OrdinalIgnoreCase) ||
-            !string.Equals(Path.GetFileName(Path.GetDirectoryName(packagePath)), "Packages", StringComparison.OrdinalIgnoreCase) ||
+        var protectedStageRoot = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory,
+            ".installer-broker", "staged"));
+        bool isProtectedStage = packagePath != null &&
+            Path.GetFileName(packagePath).StartsWith(packageFolder + "-", StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(Path.GetFullPath(Path.GetDirectoryName(packagePath) ?? ""), protectedStageRoot,
+                StringComparison.OrdinalIgnoreCase);
+        bool isUserCache = packagePath != null &&
+            string.Equals(Path.GetFileName(packagePath), packageFolder, StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(Path.GetFileName(Path.GetDirectoryName(packagePath)), "Packages",
+                StringComparison.OrdinalIgnoreCase);
+        if (string.IsNullOrWhiteSpace(packagePath) || (!isUserCache && !isProtectedStage) ||
             !Path.GetFullPath(Path.Combine(packagePath, entry)).Equals(full, StringComparison.OrdinalIgnoreCase))
-            throw new IOException("Installer is not in its verified HomeWatch staging folder");
+            throw new IOException("Installer is not in an approved HomeWatch staging folder");
         if (File.GetAttributes(packagePath).HasFlag(FileAttributes.ReparsePoint))
             throw new IOException("Staging folder must not be a reparse point");
         var files = manifest.GetProperty("files");
+        if (isProtectedStage)
+        {
+            // The service already checked the full package while copying into
+            // Program Files. Recheck only the entrypoint immediately before UAC.
+            var setup = files.EnumerateArray().FirstOrDefault(f =>
+                string.Equals(f.GetProperty("path").GetString(), entry, StringComparison.OrdinalIgnoreCase));
+            if (setup.ValueKind == JsonValueKind.Undefined)
+                throw new IOException("Missing approved installer entrypoint");
+            await VerifyFileAsync(full, setup.GetProperty("sha256").GetString() ?? "",
+                setup.GetProperty("size").GetInt64());
+            return;
+        }
         int count = 0;
         long total = 0;
         foreach (var file in files.EnumerateArray())

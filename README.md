@@ -306,3 +306,8 @@ The parent-facing **Wellbeing** tab now configures child-specific hydration, toi
 ### v0.5.8 — Per-artifact elevation (UAC-gated)
 
 See [RELEASE-v0.5.8.md](RELEASE-v0.5.8.md). The Web UI now has independent elevation flags for a published installer and an approved game executable. The Windows agent uses a separate on-demand elevated runtime process which independently rechecks policy and SHA-256. **Administrator UAC consent remains mandatory.** This is not an unattended SYSTEM broker, and the updater's signed three-binary format is preserved.
+
+
+### v0.5.9 protected installer broker foundation
+
+See [RELEASE-v0.5.9.md](RELEASE-v0.5.9.md). Adds a dedicated signed staging service and admin-reviewed HTTPS device pin. The interactive installer still requires local UAC; no SYSTEM desktop execution is enabled.

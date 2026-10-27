@@ -42,7 +42,7 @@ jobs:
           if ($env:GITHUB_REF -like 'refs/tags/v*') {
             $version = $env:GITHUB_REF_NAME.Substring(1)
           } else {
-            $version = '0.5.8'
+            $version = '0.5.9'
           }
           "HOMEWATCH_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           Write-Host "Building HomeWatch Agent $version"
@@ -86,6 +86,9 @@ jobs:
           dotnet publish agent/HomeWatchUpdater/HomeWatchUpdater.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:Version=$env:HOMEWATCH_VERSION -o out/updater
           if ($LASTEXITCODE -ne 0) { throw "HomeWatchUpdater publish failed ($LASTEXITCODE)" }
           Copy-Item out/updater/HomeWatchUpdater.exe out/agent/HomeWatchUpdater.exe -Force
+          dotnet publish agent/HomeWatchInstallerBroker/HomeWatchInstallerBroker.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:Version=$env:HOMEWATCH_VERSION -o out/broker
+          if ($LASTEXITCODE -ne 0) { throw "HomeWatchInstallerBroker publish failed ($LASTEXITCODE)" }
+          Copy-Item out/broker/HomeWatchInstallerBroker.exe out/agent/HomeWatchInstallerBroker.exe -Force
           # Signing happens in the optional signing step below, before ZIP creation.
       - name: Install isolated Authenticode verifier
         shell: pwsh
@@ -119,7 +122,7 @@ jobs:
             $tool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Recurse -Filter signtool.exe |
               Where-Object { $_.FullName.EndsWith('\x64\signtool.exe', [StringComparison]::OrdinalIgnoreCase) } | Select-Object -Last 1
             if (-not $tool) { throw 'Windows SDK signtool.exe unavailable on runner' }
-            'out/agent/HomeWatchAgent.exe','out/agent/HomeWatchService.exe','out/agent/HomeWatchUpdater.exe' | ForEach-Object {
+            'out/agent/HomeWatchAgent.exe','out/agent/HomeWatchService.exe','out/agent/HomeWatchUpdater.exe','out/agent/HomeWatchInstallerBroker.exe' | ForEach-Object {
               & $tool.FullName sign /fd SHA256 /f $certPath /p $env:SIGNING_PFX_PASSWORD /tr http://timestamp.digicert.com /td SHA256 $_
               if ($LASTEXITCODE -ne 0) { throw "Signing failed: $_" }
             }
@@ -137,7 +140,7 @@ jobs:
             $pemText = "-----BEGIN CERTIFICATE-----`n$([Convert]::ToBase64String($pfxCert.RawData, [Base64FormattingOptions]::InsertLineBreaks))`n-----END CERTIFICATE-----`n"
             [IO.File]::WriteAllText($pemPath, $pemText, [Text.Encoding]::ASCII)
             $verifier = (Get-Command osslsigncode.exe -ErrorAction Stop).Source
-            'out/agent/HomeWatchAgent.exe','out/agent/HomeWatchService.exe','out/agent/HomeWatchUpdater.exe' | ForEach-Object {
+            'out/agent/HomeWatchAgent.exe','out/agent/HomeWatchService.exe','out/agent/HomeWatchUpdater.exe','out/agent/HomeWatchInstallerBroker.exe' | ForEach-Object {
               Write-Host "Verifying Authenticode PE digest and exact signer on $_"
               & $verifier verify -in $_ -CAfile $pemPath -ignore-timestamp -require-leaf-hash "sha256:$($pin.ToLowerInvariant())"
               if ($LASTEXITCODE -ne 0) { throw "Invalid Authenticode signature or incorrect signing certificate on $_ ($LASTEXITCODE)" }

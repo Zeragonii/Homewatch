@@ -165,6 +165,13 @@ internal sealed class DefenderSetupForm : Form
         var signing = new Button { Text = "Signing certificate...", Width = 180, Height = 34 };
         signing.Click += (_, _) => { using var dialog = new SigningCertificateForm(); dialog.ShowDialog(this); };
         actions.Controls.Add(signing);
+        var broker = new Button { Text = "Installer broker setup...", Width = 190, Height = 34 };
+        broker.Click += (_, _) =>
+        {
+            try { InstallerBrokerClient.ConfigureWithAdministrator(); }
+            catch (Exception ex) { MessageBox.Show(this, ex.Message, "Installer broker", MessageBoxButtons.OK, MessageBoxIcon.Warning); }
+        };
+        actions.Controls.Add(broker);
         var close = new Button { Text = "Close", Width = 95, Height = 34 };
         close.Click += (_, _) => Close();
         actions.Controls.Add(close);

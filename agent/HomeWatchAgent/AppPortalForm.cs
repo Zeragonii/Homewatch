@@ -787,6 +787,15 @@ public sealed class AppPortalForm : Form
                 (File.GetAttributes(exe) & FileAttributes.ReparsePoint) != 0 ||
                 !await HashMatchesAsync(exe, entry.Sha256))
                 throw new IOException("Approved setup executable changed after staging. Installation blocked.");
+            // An independently validated, service-owned staging copy avoids
+            // elevated execution from the child-writable installer cache.
+            // This is staging ONLY: v0.5.9 still uses the ordinary UAC worker
+            // for the actual interactive administrator installation.
+            if (item.ElevateInstaller && InstallerBrokerClient.IsInstalled)
+            {
+                footer.Text = "Preparing an administrator-protected copy of your installer…";
+                exe = await InstallerBrokerClient.PrepareAsync(item.Id, cancel.Token);
+            }
             await InstallationStateAsync(item.Id, "installing");
             var before = HouseholdPackageInstaller.UninstallLocations();
             footer.Text = "Installer open — follow the normal Windows setup wizard.";
