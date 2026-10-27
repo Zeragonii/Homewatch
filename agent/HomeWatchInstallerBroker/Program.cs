@@ -80,7 +80,9 @@ internal static class BrokerSettings
         string token = root.GetProperty("DeviceToken").GetString() ?? "";
         if (!Uri.TryCreate(url, UriKind.Absolute, out var uri) || uri.Scheme != "https" ||
             string.IsNullOrWhiteSpace(id) || string.IsNullOrWhiteSpace(token))
-            throw new IOException("Enrol the device using HTTPS before provisioning the installer broker");
+            throw new IOException("The HomeWatch server URL currently uses HTTP (or the device is not enrolled). " +
+                "Configure a trusted HTTPS reverse proxy, then use Administrator performance settings > " +
+                "Server connection to save and test the HTTPS URL. Keep ProgramData: do not reset device enrolment.");
         // Only the local administrator may establish this trusted server origin.
         // Display the exact host/device instead of silently accepting the
         // normal-user-modifiable HomeWatch device configuration.

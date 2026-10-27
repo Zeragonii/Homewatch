@@ -315,3 +315,7 @@ See [RELEASE-v0.5.9.md](RELEASE-v0.5.9.md). Adds a dedicated signed staging serv
 ### v0.5.9a — Broker button visibility fix
 
 See [RELEASE-v0.5.9a.md](RELEASE-v0.5.9a.md) for the two-row admin settings fix and the one-time broker service installation requirement.
+
+### v0.5.9b — Reconfigure HomeWatch server URL
+
+See [RELEASE-v0.5.9b.md](RELEASE-v0.5.9b.md). The administrator-only Performance settings window has **Server connection...**, which verifies the existing device enrolment at a new address and saves only the URL. The tray agent reloads the new address without clearing device identity. The installer broker continues to require HTTPS; the Docker Uvicorn server needs a TLS reverse proxy.

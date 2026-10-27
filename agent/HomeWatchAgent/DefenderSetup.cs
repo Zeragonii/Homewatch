@@ -179,6 +179,9 @@ internal sealed class DefenderSetupForm : Form
             catch (Exception ex) { MessageBox.Show(this, ex.Message, "Installer broker", MessageBoxButtons.OK, MessageBoxIcon.Warning); }
         };
         brokerActions.Controls.Add(broker);
+        var connection = new Button { Text = "Server connection...", Width = 175, Height = 34 };
+        connection.Click += (_, _) => { using var dialog = new ServerConnectionForm(); dialog.ShowDialog(this); };
+        brokerActions.Controls.Add(connection);
         var close = new Button { Text = "Close", Width = 95, Height = 34 };
         close.Click += (_, _) => Close();
         brokerActions.Controls.Add(close);

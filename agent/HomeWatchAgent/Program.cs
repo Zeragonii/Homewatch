@@ -78,7 +78,8 @@ public sealed class AgentContext : ApplicationContext
     // Device credentials/identity are machine-wide; logs remain per Windows profile.
     readonly string dataDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "HomeWatch");
     readonly string logDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "HomeWatch");
-    readonly HttpClient http = new() { Timeout = TimeSpan.FromSeconds(30) };
+    HttpClient http = new() { Timeout = TimeSpan.FromSeconds(30) };
+    readonly System.Windows.Forms.Timer connectionRefreshTimer = new() { Interval = 5000 };
     readonly NotifyIcon tray;
     private AppPortalForm? appPortal;
     private readonly EventWaitHandle portalSignal;
@@ -127,6 +128,8 @@ public sealed class AgentContext : ApplicationContext
         // Local per-user wellbeing scheduler survives closed Launcher windows.
         // No special privileges, no screen-time policy dependency.
         wellbeing = new WellbeingManager(http, Request, IsActiveConsoleSession, () => !string.IsNullOrEmpty(config.DeviceId) && !string.IsNullOrEmpty(config.DeviceToken), IdleSeconds, logDir, Log);
+        connectionRefreshTimer.Tick += (_, _) => RefreshConnectionFromDisk();
+        connectionRefreshTimer.Start();
         // All-user autostart is provisioned by the elevated installer (HKLM Run).
         // Don't create a per-user HKCU Run key here.
         _ = LoopAsync();
@@ -135,7 +138,10 @@ public sealed class AgentContext : ApplicationContext
 
     protected override void ExitThreadCore()
     {
+        connectionRefreshTimer.Stop();
+        connectionRefreshTimer.Dispose();
         wellbeing?.Dispose();
+        http.Dispose();
         base.ExitThreadCore();
     }
 
@@ -158,6 +164,40 @@ public sealed class AgentContext : ApplicationContext
     {
         var path = Path.Combine(dataDir, "config.json");
         File.WriteAllText(path, JsonSerializer.Serialize(config, new JsonSerializerOptions { WriteIndented = true }));
+    }
+
+    // Administrator changes to ProgramData\HomeWatch\config.json take effect without
+    // purging device enrolment or requiring the child to log out of Windows.
+    // This timer runs on the tray UI thread; network work remains in LoopAsync.
+    void RefreshConnectionFromDisk()
+    {
+        try
+        {
+            var path = Path.Combine(dataDir, "config.json");
+            var changed = JsonSerializer.Deserialize<AgentConfig>(File.ReadAllText(path));
+            if (changed is null || !Uri.TryCreate(changed.ServerUrl, UriKind.Absolute, out var target) ||
+                target.Scheme is not ("http" or "https")) return;
+            if (string.Equals(config.ServerUrl.TrimEnd('/'), changed.ServerUrl.TrimEnd('/'), StringComparison.OrdinalIgnoreCase) &&
+                config.DeviceId == changed.DeviceId && config.DeviceToken == changed.DeviceToken) return;
+            var replacement = new HttpClient { BaseAddress = new Uri(changed.ServerUrl.TrimEnd('/') + "/"),
+                Timeout = TimeSpan.FromSeconds(30) };
+            var previous = http;
+            // Recreate the reminder scheduler so its HTTP client follows the new server.
+            // Its state is kept on disk; changing the connection does not reset timers.
+            wellbeing?.Dispose();
+            config = changed;
+            http = replacement;
+            wellbeing = new WellbeingManager(http, Request, IsActiveConsoleSession,
+                () => !string.IsNullOrEmpty(config.DeviceId) && !string.IsNullOrEmpty(config.DeviceToken),
+                IdleSeconds, logDir, Log);
+            if (appPortal is not null && !appPortal.IsDisposed) appPortal.Close();
+            appPortal = null;
+            lastHeartbeat = lastActivityFlush = lastCommandPoll = lastPolicyCheck = lastUpdateCheck = DateTime.MinValue;
+            previous.Dispose();
+            Log("Server connection updated to " + changed.ServerUrl);
+            tray.ShowBalloonTip(3500, "HomeWatch", "Server connection updated successfully.", ToolTipIcon.Info);
+        }
+        catch (Exception ex) { Log("Could not refresh server connection: " + ex.Message); }
     }
 
     // Only the foreground console session reports activity and receives commands.
