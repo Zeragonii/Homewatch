@@ -87,6 +87,17 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "HomeWatchUpdater publish failed ($LASTEXITCODE)" }
           Copy-Item out/updater/HomeWatchUpdater.exe out/agent/HomeWatchUpdater.exe -Force
           # Signing happens in the optional signing step below, before ZIP creation.
+      - name: Install isolated Authenticode verifier
+        shell: pwsh
+        run: |
+          # Independent PE digest + Authenticode verification, with the signing
+          # certificate supplied directly to the verifier as a trust anchor.
+          # No import to the GitHub runner's Trusted Root store is required.
+          choco install osslsigncode --no-progress -y --version=2.6.0
+          if ($LASTEXITCODE -ne 0) { throw "Unable to install osslsigncode ($LASTEXITCODE)" }
+          $verifier = Get-Command osslsigncode.exe -ErrorAction Stop
+          Write-Host "Using $($verifier.Source) for Authenticode digest verification"
+
       - name: Sign Windows binaries when a trusted publisher certificate is configured
         timeout-minutes: 8
         shell: pwsh
@@ -112,31 +123,30 @@ jobs:
               & $tool.FullName sign /fd SHA256 /f $certPath /p $env:SIGNING_PFX_PASSWORD /tr http://timestamp.digicert.com /td SHA256 $_
               if ($LASTEXITCODE -ne 0) { throw "Signing failed: $_" }
             }
-            # CI must NOT import a self-signed code-signing certificate into the
-            # runner's CurrentUser\Root store: Windows can display a trust warning
-            # that is invisible on a noninteractive GitHub-hosted Windows runner.
-            # The signing key was used to produce the binaries immediately above.
-            # Check the embedded PE signature against the exact expected certificate
-            # and reject unsigned, altered, or otherwise invalid signatures.
-            # The only permitted trust-policy error in CI is NotTrusted, expected
-            # because this private household CA is NOT in Microsoft's root store.
-            # Production clients enforce Authenticode trust + the locally approved
-            # signer pin; this CI allowance does NOT relax client policy.
-            Write-Host 'SignTool completed for all three EXEs. Checking signer fingerprints without modifying Windows trust stores.'
+            # PowerShell's Get-AuthenticodeSignature can return UnknownError for
+            # a valid self-signed publisher on an untrusted ephemeral runner.
+            # Never accept UnknownError (or NotTrusted) as proof of integrity.
+            # osslsigncode validates the embedded Authenticode signature AND
+            # the PE file digest against only this exact expected signer cert.
+            # -ignore-timestamp means this CI check does not validate TSA chains;
+            # Windows clients still require full WinVerifyTrust + a local pin.
+            Write-Host 'SignTool completed. Checking PE digests and signer fingerprints using osslsigncode.'
             $pfxCert = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($certPath, $env:SIGNING_PFX_PASSWORD)
             $pin = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($pfxCert.RawData))
+            $pemPath = Join-Path $env:RUNNER_TEMP 'homewatch-signing-public.pem'
+            $pemText = "-----BEGIN CERTIFICATE-----`n$([Convert]::ToBase64String($pfxCert.RawData, [Base64FormattingOptions]::InsertLineBreaks))`n-----END CERTIFICATE-----`n"
+            [IO.File]::WriteAllText($pemPath, $pemText, [Text.Encoding]::ASCII)
+            $verifier = (Get-Command osslsigncode.exe -ErrorAction Stop).Source
             'out/agent/HomeWatchAgent.exe','out/agent/HomeWatchService.exe','out/agent/HomeWatchUpdater.exe' | ForEach-Object {
-              Write-Host "Verifying Authenticode signature and signer pin on $_"
+              Write-Host "Verifying Authenticode PE digest and exact signer on $_"
+              & $verifier verify -in $_ -CAfile $pemPath -ignore-timestamp -require-leaf-hash "sha256:$($pin.ToLowerInvariant())"
+              if ($LASTEXITCODE -ne 0) { throw "Invalid Authenticode signature or incorrect signing certificate on $_ ($LASTEXITCODE)" }
+              # Diagnostic only: CI trust-store status is NOT used to determine validity.
               $check = Get-AuthenticodeSignature -LiteralPath $_
-              if (-not $check.SignerCertificate) { throw "Missing Authenticode signer on $_ : $($check.Status)" }
-              if ($check.Status -notin @('Valid', 'NotTrusted')) {
-                throw "Invalid Authenticode signature on $_ : $($check.Status). Only Valid or self-signed NotTrusted are allowed."
-              }
-              $actual = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($check.SignerCertificate.RawData))
-              if ($actual -ne $pin) { throw "Incorrect signing certificate on $_" }
-              Write-Host "Verified $_ (status: $($check.Status), correct SHA-256 signer pin)"
+              Write-Host "Verified $_ (Windows trust-store status: $($check.Status); exact SHA-256 signer pin and PE digest verified)"
             }
             "HOMEWATCH_SIGNER_SHA256=$pin" | Out-File -FilePath $env:GITHUB_ENV -Append
+            "HOMEWATCH_SIGNER_PEM=$pemPath" | Out-File -FilePath $env:GITHUB_ENV -Append
             "SIGNTOOL_PATH=$($tool.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
           } finally { Remove-Item $certPath -Force -ErrorAction SilentlyContinue }
 
@@ -182,13 +192,13 @@ jobs:
               [IO.File]::WriteAllBytes($certPath, [Convert]::FromBase64String($env:SIGNING_PFX_BASE64))
               & $env:SIGNTOOL_PATH sign /fd SHA256 /f $certPath /p $env:SIGNING_PFX_PASSWORD /tr http://timestamp.digicert.com /td SHA256 HomeWatch-Agent-Setup-win-x64.exe
               if ($LASTEXITCODE -ne 0) { throw 'Installer signing failed' }
-              Write-Host 'Checking signed Inno Setup installer (self-signed certificate is not a public trust root)'
+              Write-Host 'Verifying signed Inno Setup installer PE digest and exact pinned signer'
+              if (-not (Test-Path -LiteralPath $env:HOMEWATCH_SIGNER_PEM)) { throw 'Missing CI publisher PEM file' }
+              $verifier = (Get-Command osslsigncode.exe -ErrorAction Stop).Source
+              & $verifier verify -in HomeWatch-Agent-Setup-win-x64.exe -CAfile $env:HOMEWATCH_SIGNER_PEM -ignore-timestamp -require-leaf-hash "sha256:$($env:HOMEWATCH_SIGNER_SHA256.ToLowerInvariant())"
+              if ($LASTEXITCODE -ne 0) { throw "Installer signature verification failed ($LASTEXITCODE): invalid PE digest or wrong publisher" }
               $check = Get-AuthenticodeSignature -LiteralPath HomeWatch-Agent-Setup-win-x64.exe
-              if (-not $check.SignerCertificate -or $check.Status -notin @('Valid', 'NotTrusted')) {
-                throw "Installer signature verification failed: $($check.Status)"
-              }
-              $actual = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($check.SignerCertificate.RawData))
-              if ($actual -ne $env:HOMEWATCH_SIGNER_SHA256) { throw 'Installer publisher does not match the signed binaries' }
+              Write-Host "Verified installer signature and publisher pin (Windows trust-store status: $($check.Status))"
             } finally { Remove-Item $certPath -Force -ErrorAction SilentlyContinue }
           }
           (Get-FileHash HomeWatch-Agent-Setup-win-x64.exe -Algorithm SHA256).Hash.ToLower() | Out-File -Encoding ascii HomeWatch-Agent-Setup-win-x64.sha256

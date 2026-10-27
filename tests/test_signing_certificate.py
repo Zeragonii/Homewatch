@@ -106,5 +106,5 @@ def test_tagged_actions_release_must_be_signed_and_verified():
     assert "if ($env:GITHUB_REF -like 'refs/tags/v*')" in wf
     assert 'Tagged HomeWatch releases MUST be signed' in wf
     assert 'Get-AuthenticodeSignature' in wf
-    assert 'Incorrect signing certificate' in wf
+    assert 'incorrect signing certificate' in wf.lower()
     assert 'Installer signature verification failed' in wf

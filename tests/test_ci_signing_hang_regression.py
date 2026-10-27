@@ -9,17 +9,20 @@ def test_windows_signing_does_not_import_self_signed_root_on_unattended_runner()
     assert 'CertStoreLocation' not in signing
     assert 'Import-Certificate' not in signing
     assert "timeout-minutes: 8" in signing
-    assert "Get-AuthenticodeSignature -LiteralPath $_" in signing
-    assert "'Valid', 'NotTrusted'" in signing
-    assert 'SHA256]::HashData($check.SignerCertificate.RawData)' in signing
-    assert 'Incorrect signing certificate' in signing
+    assert 'osslsigncode.exe' in WORKFLOW
+    assert '-CAfile $pemPath' in signing
+    assert '-require-leaf-hash "sha256:$($pin.ToLowerInvariant())"' in signing
+    assert 'if ($LASTEXITCODE -ne 0) { throw "Invalid Authenticode signature' in signing
+    assert 'Get-AuthenticodeSignature -LiteralPath $_' in signing
+    assert "$check.Status -notin" not in signing
 
 
 def test_installer_checks_same_self_signed_signer_pin():
     signing = WORKFLOW.split('      - name: Build Windows installer',1)[1].split('      - uses: actions/upload-artifact',1)[0]
-    assert "Get-AuthenticodeSignature -LiteralPath HomeWatch-Agent-Setup-win-x64.exe" in signing
-    assert "'Valid', 'NotTrusted'" in signing
-    assert "$actual -ne $env:HOMEWATCH_SIGNER_SHA256" in signing
+    assert '-CAfile $env:HOMEWATCH_SIGNER_PEM' in signing
+    assert '-require-leaf-hash "sha256:$($env:HOMEWATCH_SIGNER_SHA256.ToLowerInvariant())"' in signing
+    assert 'if ($LASTEXITCODE -ne 0) { throw "Installer signature verification failed' in signing
+    assert 'Get-AuthenticodeSignature -LiteralPath HomeWatch-Agent-Setup-win-x64.exe' in signing
 
 
 def test_client_side_signed_update_enforcement_stays_intact():
