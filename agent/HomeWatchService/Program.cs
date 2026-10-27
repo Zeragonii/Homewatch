@@ -76,7 +76,7 @@ internal sealed class ReleaseWorker(ILogger<ReleaseWorker> log) : BackgroundServ
     private static HttpClient CreateHttp()
     {
         var h = new HttpClient { Timeout = TimeSpan.FromMinutes(5) };
-        h.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue("HomeWatch", "0.5.7"));
+        h.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue("HomeWatch", "0.5.8"));
         h.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/vnd.github+json"));
         return h;
     }

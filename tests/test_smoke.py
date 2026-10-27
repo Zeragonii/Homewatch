@@ -412,3 +412,79 @@ def test_only_admin_can_set_manual_relative_launch_path():
         response = client.put(target, json={'relative_path': bad})
         assert response.status_code == 400, (bad, response.text)
     assert client.get(f'/agent/catalogue/{cid}', headers=auth).json()['launch_relative_path'] == good
+
+
+def test_058_elevation_is_granted_only_by_parent_for_exact_approved_game():
+    import hashlib, uuid
+    digest = hashlib.sha256(uuid.uuid4().bytes).hexdigest()
+    device_id, headers = _make_app_device()
+    candidate = _app_candidate('a')
+    candidate['sha256'] = digest
+    created = client.post('/agent/applications/requests', headers=headers, json=candidate)
+    assert created.status_code == 200, created.text
+    request_id = created.json()['id']
+    assert client.get(f'/agent/elevation/launch/{request_id}', headers=headers).status_code == 403
+    assert client.put(f'/api/elevation/games/{digest}', json={'enabled': True}).status_code == 409
+    assert client.post(f'/api/applications/requests/{request_id}/decision', json={'decision': 'approved', 'scope': 'device'}).status_code == 200
+    assert client.post(f'/agent/applications/{request_id}/verify',headers=headers,json=candidate).json()['elevated'] is False
+    assert client.put(f'/api/elevation/games/{digest}', json={'enabled': True}).status_code == 200
+    assert client.post(f'/agent/applications/{request_id}/verify',headers=headers,json=candidate).json()['elevated'] is True
+    allowed = client.get(f'/agent/elevation/launch/{request_id}', headers=headers)
+    assert allowed.status_code == 200 and allowed.json()['sha256'] == digest
+    other_id, other_headers = _make_app_device()
+    assert client.get(f'/agent/elevation/launch/{request_id}', headers=other_headers).status_code == 404
+    assert client.put(f'/api/elevation/games/{digest}', json={'enabled': False}).status_code == 200
+    assert client.get(f'/agent/elevation/launch/{request_id}', headers=headers).status_code == 403
+
+
+def test_058_parent_installer_elevation_requires_published_verified_manifest():
+    import hashlib, uuid
+    digest = hashlib.sha256(uuid.uuid4().bytes).hexdigest()
+    package = dict(name='Test Elevation Package', installer_path=r'\\192.168.1.250\installers\test\setup.exe', installer_sha256=digest,
+        description='', enabled=True)
+    created = client.post('/api/catalogue', json=package)
+    assert created.status_code == 200, created.text
+    catalogue_id = created.json()['id']
+    device_id, headers = _make_app_device()
+    assert client.get(f'/agent/elevation/installer/{catalogue_id}', headers=headers).status_code == 403
+    enabled = client.put(f'/api/catalogue/{catalogue_id}/elevation', json={'enabled': True})
+    assert enabled.status_code == 200
+    # Legacy single-file packages cannot be auto elevated because they lack a complete manifest.
+    assert client.get(f'/agent/elevation/installer/{catalogue_id}', headers=headers).status_code == 403
+    updated = client.put(f'/api/catalogue/{catalogue_id}', json={**package, 'installer_sha256': '1'*64})
+    assert updated.status_code == 200
+    assert updated.json()['elevate_installer'] is False
+
+
+def test_058_runtime_broker_is_separate_and_uses_local_uac_not_system_service():
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[1]
+    broker = (root/'agent/HomeWatchAgent/RuntimeBroker.cs').read_text()
+    assert 'Verb = "runas"' in broker
+    assert 'WindowsBuiltInRole.Administrator' in broker
+    assert 'agent/elevation/installer/' in broker and 'agent/elevation/launch/' in broker
+    assert 'SHA256.HashDataAsync' in broker
+    assert 'UseShellExecute = true' in broker
+    assert 'ProcessStartInfo("cmd' not in broker
+    assert 'CreateProcessAsUser' not in broker
+    assert 'Process.GetProcessesByName(Path.GetFileNameWithoutExtension(path))' in broker
+    assert 'Settings.Allowed' not in broker
+    workflow = (root/'.github/workflows/release.yml').read_text()
+    assert "('HomeWatchAgent.exe', 'HomeWatchService.exe', 'HomeWatchUpdater.exe')" in workflow
+
+
+def test_058_revoking_last_normal_game_approval_revokes_its_elevation_grant():
+    import hashlib, uuid
+    digest = hashlib.sha256(uuid.uuid4().bytes).hexdigest()
+    device, headers = _make_app_device()
+    candidate = _app_candidate('b')
+    candidate['sha256'] = digest
+    requested = client.post('/agent/applications/requests',headers=headers,json=candidate).json()
+    assert client.post(f"/api/applications/requests/{requested['id']}/decision",json={'decision':'approved','scope':'device'}).status_code == 200
+    assert client.put(f'/api/elevation/games/{digest}',json={'enabled':True}).status_code == 200
+    approval = next(a for a in client.get('/api/applications').json()['approvals'] if a['sha256']==digest)
+    assert client.delete(f"/api/applications/approvals/{approval['id']}").status_code == 200
+    assert client.get(f"/agent/elevation/launch/{requested['id']}",headers=headers).status_code == 403
+    from server.app.main import SessionLocal, GameElevationGrant
+    with SessionLocal() as db:
+        assert db.get(GameElevationGrant,digest).enabled is False

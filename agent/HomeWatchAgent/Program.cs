@@ -29,6 +29,12 @@ internal static class Program
             DefenderSetup.ShowElevated();
             return;
         }
+        // Dedicated on-demand elevated process. No tray, device loop, or updater work.
+        if (args.Length > 0 && args[0] == "--elevated-runtime")
+        {
+            Environment.ExitCode = RuntimeBroker.RunAsync(args).GetAwaiter().GetResult();
+            return;
+        }
         bool openPortal = args.Any(x => x.Equals("--apps", StringComparison.OrdinalIgnoreCase));
         using var singleton = new Mutex(true, SingleAgentMutex, out bool firstInstance);
         if (!firstInstance)

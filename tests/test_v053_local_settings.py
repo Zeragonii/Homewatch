@@ -43,8 +43,8 @@ def test_remote_service_not_modified_to_initiate_exclusions():
 
 def test_version_and_three_executable_update_contract():
     workflow = (ROOT / '.github/workflows/release.yml').read_text()
-    assert "$version = '0.5.7'" in workflow
-    assert '<Version>0.5.7</Version>' in (AGENT / 'HomeWatchAgent.csproj').read_text()
-    assert '#define MyAppVersion "0.5.7"' in (ROOT / 'agent/installer/HomeWatchAgent.iss').read_text()
+    assert "$version = '0.5.8'" in workflow
+    assert '<Version>0.5.8</Version>' in (AGENT / 'HomeWatchAgent.csproj').read_text()
+    assert '#define MyAppVersion "0.5.8"' in (ROOT / 'agent/installer/HomeWatchAgent.iss').read_text()
     assert "@('HomeWatchAgent.exe', 'HomeWatchService.exe', 'HomeWatchUpdater.exe')" in workflow
     assert "Validate bundled Defender PowerShell syntax" in workflow

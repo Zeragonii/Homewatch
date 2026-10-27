@@ -302,3 +302,7 @@ session, and Stop requires confirmation. No new server migration.
 ## v0.5.7 — Wellbeing reminders
 
 The parent-facing **Wellbeing** tab now configures child-specific hydration, toilet and custom reminders. Reminders support accumulated active time, elapsed logged-in clock time, or chosen daily times; optional snooze, editable messages and an audit log are included. The tray agent tracks progress locally and delivers topmost friendly popups even if the game launcher is closed. See [RELEASE-v0.5.7.md](RELEASE-v0.5.7.md) for rollout instructions and controller/fullscreen limitations.
+
+### v0.5.8 — Per-artifact elevation (UAC-gated)
+
+See [RELEASE-v0.5.8.md](RELEASE-v0.5.8.md). The Web UI now has independent elevation flags for a published installer and an approved game executable. The Windows agent uses a separate on-demand elevated runtime process which independently rechecks policy and SHA-256. **Administrator UAC consent remains mandatory.** This is not an unattended SYSTEM broker, and the updater's signed three-binary format is preserved.

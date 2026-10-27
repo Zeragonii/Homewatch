@@ -231,6 +231,15 @@ class ApplicationApproval(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 
+class GameElevationGrant(Base):
+    """Separate, parent-set exact-binary elevation policy, independent of launch approval."""
+    __tablename__ = "game_elevation_grants"
+    sha256: Mapped[str] = mapped_column(String(64), primary_key=True)
+    file_name: Mapped[str] = mapped_column(String(255))
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
 class ApplicationPresentation(Base):
     __tablename__ = "application_presentations"
     sha256: Mapped[str] = mapped_column(String(64), primary_key=True)
@@ -261,6 +270,7 @@ class HouseholdCatalogueItem(Base):
     # Parent-approved relative path; never an absolute device path.
     launch_relative_path: Mapped[str] = mapped_column(String(700), default="", server_default=text("''"))
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default=text("true"))
+    elevate_installer: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
@@ -373,7 +383,8 @@ with engine.begin() as conn:
                          "manifest_json": "TEXT NOT NULL DEFAULT ''",
                          "total_bytes": "BIGINT NOT NULL DEFAULT 0",
                          "file_count": "INTEGER NOT NULL DEFAULT 0",
-                         "launch_relative_path": "VARCHAR(700) NOT NULL DEFAULT ''"}.items():
+                         "launch_relative_path": "VARCHAR(700) NOT NULL DEFAULT ''",
+                         "elevate_installer": "BOOLEAN NOT NULL DEFAULT false"}.items():
             if col not in catalog_columns:
                 conn.execute(text(f"ALTER TABLE household_catalogue ADD COLUMN {col} {ddl}"))
     if inspect(conn).has_table("household_installations"):
@@ -1386,6 +1397,7 @@ def request_json(row: ApplicationRequest, db: Session, device: Device | None = N
         'publisher': row.publisher, 'signer_thumbprint': row.signer_thumbprint,
         'signer_subject': row.signer_subject, 'signer_issuer': row.signer_issuer,
         'reason': row.reason, 'status': status, 'approval_scope': approval.scope if approval else '',
+        'elevation_allowed': bool(approval and (grant := db.get(GameElevationGrant, row.sha256)) and grant.enabled and grant.file_name.casefold() == row.file_name.casefold()),
         **presentation_json(db, row.sha256, row.file_name),
         'created_at': row.created_at.isoformat(), 'reviewed_at': row.reviewed_at.isoformat() if row.reviewed_at else None
     }
@@ -1424,7 +1436,9 @@ def agent_application_verify(request_id: int, body: ApplicationCandidate,
         raise HTTPException(409, 'Application signature changed; submit a new request')
     approval = matching_approval(db, device, info)
     if not approval: raise HTTPException(403, 'This application is not currently approved')
-    return {'approved': True, 'approval_id': approval.id, 'scope': approval.scope, 'elevated': False}
+    grant = db.get(GameElevationGrant, row.sha256)
+    return {'approved': True, 'approval_id': approval.id, 'scope': approval.scope,
+            'elevated': bool(grant and grant.enabled and grant.file_name.casefold() == row.file_name.casefold())}
 
 @app.post('/agent/applications/launched')
 def agent_application_launched(body: ApplicationLaunchResult,
@@ -1451,7 +1465,8 @@ def admin_applications(db: Session = Depends(db_session)):
         'requests': [request_json(row,db) for row in rows],
         'approvals': [dict(id=a.id, file_name=a.file_name, sha256=a.sha256, publisher=a.publisher,
                            signature_status=a.signature_status, scope=a.scope, device_id=a.device_id,
-                           child_id=a.child_id, created_at=a.created_at.isoformat()) for a in approvals],
+                           child_id=a.child_id, created_at=a.created_at.isoformat(),
+                           elevation_allowed=bool((grant := db.get(GameElevationGrant, a.sha256)) and grant.enabled and grant.file_name.casefold() == a.file_name.casefold())) for a in approvals],
         'launches': [dict(id=x.id, device_id=x.device_id, request_id=x.request_id,
                           status=x.status, detail=x.detail, created_at=x.created_at.isoformat()) for x in launches]
     }
@@ -1485,8 +1500,81 @@ def decide_application(request_id: int, body: ApplicationDecision, db: Session =
 def revoke_application(approval_id: int, db: Session = Depends(db_session)):
     approval = db.get(ApplicationApproval, approval_id)
     if not approval: raise HTTPException(404, 'Approval not found')
-    db.delete(approval); db.commit()
+    digest = approval.sha256
+    db.delete(approval)
+    db.flush()
+    # A disabled/removed final launch approval must not leave a dormant
+    # elevation grant waiting to re-activate on the next normal approval.
+    if not db.scalar(select(ApplicationApproval).where(ApplicationApproval.sha256 == digest)):
+        grant = db.get(GameElevationGrant, digest)
+        if grant:
+            grant.enabled = False
+            grant.updated_at = datetime.now(timezone.utc)
+    db.commit()
     return {'ok': True}
+
+
+# ------------------ v0.5.8 parent-selected elevation policy ------------------
+# These flags are policy only: never permit the server to submit a command line
+# or an arbitrary path for privileged execution.
+class ElevationSetting(BaseModel):
+    enabled: bool
+
+
+@app.put('/api/elevation/games/{digest}', dependencies=[Depends(require_admin)])
+def set_game_elevation(digest: str, body: ElevationSetting, db: Session = Depends(db_session)):
+    key = digest.lower()
+    if not re.fullmatch(r'[0-9a-f]{64}', key):
+        raise HTTPException(400, 'Invalid executable SHA-256')
+    approval = db.scalar(select(ApplicationApproval).where(ApplicationApproval.sha256 == key))
+    if not approval:
+        raise HTTPException(409, 'Approve the exact game executable before configuring elevation')
+    grant = db.get(GameElevationGrant, key)
+    if grant is None:
+        grant = GameElevationGrant(sha256=key, file_name=approval.file_name)
+        db.add(grant)
+    grant.file_name = approval.file_name
+    grant.enabled = body.enabled
+    grant.updated_at = datetime.now(timezone.utc)
+    db.commit()
+    return {'sha256': key, 'enabled': grant.enabled}
+
+
+@app.put('/api/catalogue/{catalogue_id}/elevation', dependencies=[Depends(require_admin)])
+def set_installer_elevation(catalogue_id: int, body: ElevationSetting, db: Session = Depends(db_session)):
+    item = db.get(HouseholdCatalogueItem, catalogue_id)
+    if item is None: raise HTTPException(404, 'Catalogue entry not found')
+    item.elevate_installer = body.enabled
+    item.updated_at = datetime.now(timezone.utc)
+    db.commit()
+    return {'catalogue_id': item.id, 'enabled': item.elevate_installer}
+
+
+@app.get('/agent/elevation/launch/{request_id}')
+def elevation_game_authorisation(request_id: int, device: Device = Depends(agent_auth), db: Session = Depends(db_session)):
+    row = db.get(ApplicationRequest, request_id)
+    if row is None or row.device_id != device.id:
+        raise HTTPException(404, 'Application request not found')
+    info = {k: getattr(row, k) for k in ('file_name','sha256','signature_status','signer_thumbprint')}
+    if not matching_approval(db, device, info):
+        raise HTTPException(403, 'Application launch is not approved')
+    grant = db.get(GameElevationGrant, row.sha256)
+    if not grant or not grant.enabled or grant.file_name.casefold() != row.file_name.casefold():
+        raise HTTPException(403, 'Elevated game launch is not approved')
+    return {'request_id': row.id, 'file_name': row.file_name, 'file_path': row.file_path,
+            'sha256': row.sha256, 'file_size': row.file_size,
+            'signature_status': row.signature_status, 'signer_thumbprint': row.signer_thumbprint}
+
+
+@app.get('/agent/elevation/installer/{catalogue_id}')
+def elevation_installer_authorisation(catalogue_id: int, device: Device = Depends(agent_auth), db: Session = Depends(db_session)):
+    item = db.get(HouseholdCatalogueItem, catalogue_id)
+    if not item or not item.enabled or not item.elevate_installer:
+        raise HTTPException(403, 'Elevated installer use is not approved')
+    if not item.manifest_json:
+        raise HTTPException(403, 'Elevated installation requires a verified package manifest')
+    return {'catalogue_id': item.id, 'installer_sha256': item.installer_sha256,
+            'package_entrypoint': item.package_entrypoint, 'manifest': json.loads(item.manifest_json)}
 
 
 # ------------------------ Household software catalogue v0.4.5 ------------------------
@@ -1575,7 +1663,7 @@ def catalogue_json(db: Session, item: HouseholdCatalogueItem, include_path: bool
                 installer_sha256=item.installer_sha256, description=item.description,
                 package_root=item.package_root, package_entrypoint=item.package_entrypoint,
                 manifest=manifest, total_bytes=item.total_bytes, file_count=item.file_count,
-                launch_relative_path=item.launch_relative_path,
+                launch_relative_path=item.launch_relative_path, elevate_installer=item.elevate_installer,
                 installation=state, game_scan_roots=game_scan_roots,
                 enabled=item.enabled, created_at=item.created_at.isoformat(),
                 updated_at=item.updated_at.isoformat(),
@@ -1646,6 +1734,7 @@ def edit_catalogue_item(catalogue_id: int, body: CatalogueBody, db: Session = De
     if not body.manifest_job_id and row.manifest_json and body.installer_path == row.installer_path and body.installer_sha256 == row.installer_sha256:
         info.update(package_root=row.package_root, package_entrypoint=row.package_entrypoint, manifest_json=row.manifest_json, total_bytes=row.total_bytes, file_count=row.file_count)
     if info["installer_sha256"] != row.installer_sha256:
+        row.elevate_installer = False
         row.launch_relative_path = ""  # A changed installer needs fresh review.
     for key, value in info.items(): setattr(row, key, value)
     row.updated_at = datetime.now(timezone.utc)

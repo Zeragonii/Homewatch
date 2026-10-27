@@ -236,7 +236,7 @@ async function loadApplications(force=false){
       <td><div class="row-actions"><select id="app-scope-${r.id}" aria-label="Approval scope"><option value="device">This device</option><option value="child">Child's devices</option>${r.signature_status==='valid'&&r.signer_thumbprint?'<option value="global">Entire family</option>':''}</select><button class="accept" onclick="decideApplication(${r.id},'approved')">Approve</button><button class="warn" onclick="decideApplication(${r.id},'denied')">Deny</button></div></td>
     </tr>`).join('')}</tbody></table></div>`:'<div class="app-empty">All caught up — no pending application requests.</div>';
     const approvals=document.getElementById('appApprovals');
-    approvals.innerHTML=data.approvals.length?`<div class="app-wrap"><table class="app-table"><thead><tr><th>Application</th><th>Scope</th><th>Fingerprint</th><th></th></tr></thead><tbody>${data.approvals.map(a=>`<tr><td><b>${esc(a.display_name)}</b><button class="subtle-action" onclick="openAppEditor('${a.sha256}')">Edit tile</button><div class="meta">${esc(a.file_name)} · ${esc(a.publisher||'Unsigned / unknown')}</div></td><td>${esc(a.scope==='global'?'Entire family':a.scope==='child'?'Child devices':'One device')}</td><td><span class="fingerprint">${esc(a.sha256.substring(0,20))}…</span></td><td><button class="secondary" onclick="revokeApplication(${a.id})">Revoke</button></td></tr>`).join('')}</tbody></table></div>`:'<div class="app-empty">No active application approvals.</div>';
+    approvals.innerHTML=data.approvals.length?`<div class="app-wrap"><table class="app-table"><thead><tr><th>Application</th><th>Scope</th><th>Fingerprint</th><th></th></tr></thead><tbody>${data.approvals.map(a=>`<tr><td><b>${esc(a.display_name)}</b><button class="subtle-action" onclick="openAppEditor('${a.sha256}')">Edit tile</button><div class="meta">${esc(a.file_name)} · ${esc(a.publisher||'Unsigned / unknown')}</div></td><td>${esc(a.scope==='global'?'Entire family':a.scope==='child'?'Child devices':'One device')}</td><td><span class="fingerprint">${esc(a.sha256.substring(0,20))}…</span></td><td><button class="secondary" onclick="setGameElevation('${a.sha256}',${!a.elevation_allowed})">${a.elevation_allowed?'Disable elevation':'Allow elevation (UAC)'}</button> <button class="secondary" onclick="revokeApplication(${a.id})">Revoke</button></td></tr>`).join('')}</tbody></table></div>`:'<div class="app-empty">No active application approvals.</div>';
     document.getElementById('appHistory').innerHTML=`<div class="app-wrap"><table class="app-table"><tbody>${data.requests.filter(r=>r.status!=='pending').slice(0,30).map(r=>`<tr><td>${esc(r.file_name)}<div class="meta">${esc(r.child_name)} · ${esc(r.device_name)}</div></td><td>${esc(r.status)}</td><td class="muted">${esc(new Date(r.created_at).toLocaleString())}</td></tr>`).join('')}${data.launches.slice(0,15).map(x=>`<tr><td>Launch #${x.request_id}<div class="meta">${esc(x.detail)}</div></td><td>${esc(x.status)}</td><td class="muted">${esc(new Date(x.created_at).toLocaleString())}</td></tr>`).join('')}</tbody></table></div>`;
   }catch(e){document.getElementById('appRequests').textContent=`Unable to load applications: ${e.message}`}
 }
@@ -246,9 +246,21 @@ async function decideApplication(id,decision){
   if(decision==='approved'&&scope==='global'&&!confirm('Approve this exact signed binary for ALL family devices?'))return;
   try{await api(`/api/applications/requests/${id}/decision`,{method:'POST',body:JSON.stringify({decision,scope})});lastApplicationSnapshot='';await loadApplications(true)}catch(e){alert(e.message)}
 }
+async function setGameElevation(digest,enabled){
+  if(enabled&&!confirm('Allow this exact game executable SHA-256 to request administrator elevation across enrolled PCs? Windows UAC remains required.'))return;
+  try{await api(`/api/elevation/games/${digest}`,{method:'PUT',body:JSON.stringify({enabled})});
+    lastApplicationSnapshot='';await loadApplications(true);
+  }catch(e){alert(e.message)}
+}
+async function setInstallerElevation(id,enabled){
+  if(enabled&&!confirm('Allow this exact published installer package to request administrator elevation on all clients? Windows UAC remains required.'))return;
+  try{await api(`/api/catalogue/${id}/elevation`,{method:'PUT',body:JSON.stringify({enabled})});
+    lastCatalogueSnapshot='';await loadCatalogue(true);
+  }catch(e){alert(e.message)}
+}
 async function revokeApplication(id){if(!confirm('Revoke this approval?'))return;try{await api(`/api/applications/approvals/${id}`,{method:'DELETE'});lastApplicationSnapshot='';await loadApplications(true)}catch(e){alert(e.message)}}
 
-// Centrally published installers. No local administrator elevation is granted.
+// Centrally published installers. Each exact package has an independent parent-selected UAC elevation setting.
 let lastCatalogueData={items:[],attempts:[]};
 let lastCatalogueSnapshot='';
 let editingCatalogueId=null;
@@ -265,7 +277,7 @@ async function loadCatalogue(force=false){
       <div class="meta">${a.launch_relative_path ? 'Shared launch path: <code>'+esc(a.launch_relative_path)+'</code> <button class="subtle-action" onclick="clearCatalogueLaunchHint('+a.id+')">Clear</button>' : 'No approved shared launch path yet'} <button class="subtle-action" onclick="editCatalogueLaunchPath(${a.id})">Set path</button></div></td>
       <td class="catalogue-source"><div class="meta">${esc(a.installer_path)}</div><span class="fingerprint">SHA-256 ${esc(a.installer_sha256.substring(0,18))}…</span></td>
       <td>${a.enabled?'<span class="online">Published</span>':'<span class="offline">Hidden</span>'}</td>
-      <td><div class="catalogue-row-actions"><button class="secondary" onclick="openCatalogueEditor(${a.id})">Edit</button>${a.enabled?`<button class="warn" onclick="unpublishCatalogueItem(${a.id})">Unpublish</button>`:''}</div></td>
+      <td><div class="catalogue-row-actions"><button class="secondary" onclick="setInstallerElevation(${a.id},${!a.elevate_installer})">${a.elevate_installer?'Disable elevation':'Allow elevation (UAC)'}</button><button class="secondary" onclick="openCatalogueEditor(${a.id})">Edit</button>${a.enabled?`<button class="warn" onclick="unpublishCatalogueItem(${a.id})">Unpublish</button>`:''}</div></td>
     </tr>`).join('')}</tbody></table>`:'<div class="app-empty">Nothing published yet. Add your first NAS installer.</div>';
     const pendingHints=(data.launch_suggestions||[]).map(h=>{
       const app=data.items.find(x=>x.id===h.catalogue_id);

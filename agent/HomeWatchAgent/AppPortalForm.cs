@@ -368,6 +368,23 @@ public sealed class AppPortalForm : Form
         finally { detailPane.ResumeLayout(); }
     }
 
+    // An elevated worker can run under the administrator's account. Track its
+    // lifetime explicitly so the child can't start another copy by hammering Play.
+    private readonly Dictionary<string, Process> elevatedGames = new(StringComparer.OrdinalIgnoreCase);
+
+    private GameProcessTracker.GameState StateFor(PortalApplication app)
+    {
+        var path = LaunchPath(app);
+        if (elevatedGames.TryGetValue(path, out var broker))
+        {
+            try { if (!broker.HasExited) return GameProcessTracker.GameState.Running; }
+            catch { }
+            elevatedGames.Remove(path);
+            broker.Dispose();
+        }
+        return gameProcesses.StateFor(path);
+    }
+
     private static bool CanLaunch(PortalApplication app) => app.IsCatalogue
         ? app.InstalledApproved && app.PackageStatus != "uninstalled" &&
           app.InstalledRequestId > 0 && !string.IsNullOrWhiteSpace(app.InstalledPath)
@@ -380,7 +397,7 @@ public sealed class AppPortalForm : Form
         if (CanLaunch(app))
         {
             var path = LaunchPath(app);
-            var state = gameProcesses.StateFor(path);
+            var state = StateFor(app);
             if (state == GameProcessTracker.GameState.Running)
                 await StopGameAsync(app);
             else if (state == GameProcessTracker.GameState.Ready)
@@ -400,7 +417,7 @@ public sealed class AppPortalForm : Form
         foreach (var app in apps)
         {
             if (!CanLaunch(app)) continue;
-            var state = gameProcesses.StateFor(LaunchPath(app));
+            var state = StateFor(app);
             var tile = posterGrid.Controls.OfType<Panel>().FirstOrDefault(x => x.Tag is int id && id == app.Id);
             var status = tile?.Controls.OfType<Label>().FirstOrDefault(x => x.Name == "tile-status");
             if (status is not null && !status.IsDisposed)
@@ -448,10 +465,23 @@ public sealed class AppPortalForm : Form
     private async Task StopGameAsync(PortalApplication app)
     {
         var path = LaunchPath(app);
-        if (gameProcesses.StateFor(path) != GameProcessTracker.GameState.Running) return;
+        if (StateFor(app) != GameProcessTracker.GameState.Running) return;
         if (MessageBox.Show(this,
             $"Force close {app.DisplayName}?\n\nAny unsaved progress may be lost.",
             "Stop game", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
+        if (elevatedGames.TryGetValue(path, out var broker) && !broker.HasExited)
+        {
+            try
+            {
+                var requestId = app.IsCatalogue ? app.InstalledRequestId : app.Id;
+                using var stop = RuntimeBroker.Start("stop", requestId);
+                await stop.WaitForExitAsync();
+                footer.Text = stop.ExitCode == 0 ? "Close requested through Windows UAC." : "The elevated game may already have closed.";
+            }
+            catch (Exception e) { footer.Text = "Could not stop the elevated game: " + e.Message; }
+            finally { RefreshGameStates(); }
+            return;
+        }
         if (!gameProcesses.TryBeginStop(path)) { RefreshGameStates(); return; }
         RefreshGameStates();
         try
@@ -479,11 +509,15 @@ public sealed class AppPortalForm : Form
                 footer.Text = "This game is already running.";
                 return;
             }
-            using var process = Process.Start(new ProcessStartInfo(app.FilePath)
+            bool elevated = check.Content.Headers.ContentType != null &&
+                (await check.Content.ReadFromJsonAsync<JsonElement>()).TryGetProperty("elevated", out var grant) && grant.GetBoolean();
+            var process = elevated ? RuntimeBroker.Start("game", app.Id) : Process.Start(new ProcessStartInfo(app.FilePath)
             {
                 UseShellExecute = true, WorkingDirectory = Path.GetDirectoryName(app.FilePath) ?? ""
             });
             if (process is null) throw new IOException("Windows did not start the application");
+            if (elevated) elevatedGames[app.FilePath] = process;
+            else process.Dispose();
             footer.Text = "Starting your game… 🎮";
             await ReportLaunchAsync(app.Id, "started", "Started as the current Windows user");
         }
@@ -519,9 +553,13 @@ public sealed class AppPortalForm : Form
                 footer.Text = "This game is already running.";
                 return;
             }
-            using var process = Process.Start(new ProcessStartInfo(app.InstalledPath)
+            bool elevated = (await response.Content.ReadFromJsonAsync<JsonElement>()).TryGetProperty("elevated", out var grant) && grant.GetBoolean();
+            var process = elevated ? RuntimeBroker.Start("game", app.InstalledRequestId) :
+                Process.Start(new ProcessStartInfo(app.InstalledPath)
                 { UseShellExecute = true, WorkingDirectory = Path.GetDirectoryName(app.InstalledPath) ?? "" });
             if (process is null) throw new IOException("Unable to start the installed game");
+            if (elevated) elevatedGames[app.InstalledPath] = process;
+            else process.Dispose();
             await ReportLaunchAsync(app.InstalledRequestId, "started", "Opened from HomeWatch family library");
             footer.Text = "Starting your game… 🎮";
         }
@@ -693,11 +731,19 @@ public sealed class AppPortalForm : Form
                 ?? throw new IOException("Package no longer exists");
         }
         catch (Exception e) { footer.Text = "Unable to open the installer: " + e.Message; return; }
-        if (item.Manifest == null) { await InstallLegacyCatalogueAsync(app, button); return; }
+        if (item.Manifest == null)
+        {
+            if (item.ElevateInstaller)
+            {
+                footer.Text = "Elevated setup requires a complete approved package manifest. Republish it using the NAS browser.";
+                return;
+            }
+            await InstallLegacyCatalogueAsync(app, button); return;
+        }
         if (MessageBox.Show(this, $"Install {app.DisplayName}?\n\n" +
             $"Package size: {item.TotalBytes / (1024.0 * 1024 * 1024):F2} GB\n" +
             "HomeWatch will copy and verify the complete NAS package. " +
-            "The installer may still request an administrator password.",
+            (item.ElevateInstaller ? "Your parent has authorised elevated setup; Windows will request administrator approval." : "The installer may still request an administrator password."),
             "Install game", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
         installing = true;
         button.Enabled = false;
@@ -744,12 +790,13 @@ public sealed class AppPortalForm : Form
             await InstallationStateAsync(item.Id, "installing");
             var before = HouseholdPackageInstaller.UninstallLocations();
             footer.Text = "Installer open — follow the normal Windows setup wizard.";
-            using var process = Process.Start(new ProcessStartInfo(exe)
-            {
-                UseShellExecute = true, WorkingDirectory = Path.GetDirectoryName(exe) ?? ""
-            });
+            using var process = item.ElevateInstaller ? RuntimeBroker.Start("installer", item.Id, exe) :
+                Process.Start(new ProcessStartInfo(exe)
+                {
+                    UseShellExecute = true, WorkingDirectory = Path.GetDirectoryName(exe) ?? ""
+                });
             if (process is null) throw new IOException("Windows could not launch the installer");
-            auditStatus = "started"; auditDetail = "Interactive installer started as logged-in user";
+            auditStatus = "started"; auditDetail = item.ElevateInstaller ? "Administrator-approved interactive installer (UAC)" : "Interactive installer started as logged-in user";
             await process.WaitForExitAsync();
             if (process.ExitCode != 0)
                 throw new IOException("Installer exited with code " + process.ExitCode);
@@ -1153,6 +1200,7 @@ public sealed class PortalCatalogueItem
     [JsonPropertyName("installer_sha256")] public string InstallerSha256 { get; set; } = "";
     [JsonPropertyName("description")] public string Description { get; set; } = "";
     [JsonPropertyName("enabled")] public bool Enabled { get; set; }
+    [JsonPropertyName("elevate_installer")] public bool ElevateInstaller { get; set; }
     [JsonPropertyName("artwork_revision")] public int ArtworkRevision { get; set; }
     [JsonPropertyName("package_root")] public string PackageRoot { get; set; } = "";
     [JsonPropertyName("package_entrypoint")] public string PackageEntrypoint { get; set; } = "";

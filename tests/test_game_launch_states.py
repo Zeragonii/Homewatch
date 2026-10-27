@@ -20,7 +20,7 @@ def test_both_launch_buttons_reserve_game_before_awaiting_verification():
         assert segment.index(f'gameProcesses.TryBeginLaunch({path})') < segment.index('await ApplicationCandidate.ScanAsync')
         assert f'gameProcesses.CancelLaunch({path})' in segment
         assert f'gameProcesses.StateFor({path}) == GameProcessTracker.GameState.Running' in segment
-        assert 'using var process = Process.Start(' in segment
+        assert 'RuntimeBroker.Start("game", ' in segment and 'Process.Start(new ProcessStartInfo(' in segment
 
 
 def test_launch_state_ui_refreshes_independently_of_network_polling():
@@ -32,7 +32,7 @@ def test_launch_state_ui_refreshes_independently_of_network_polling():
     assert '"■  STOP GAME"' in source
     assert '"◷  STOPPING…"' in source
     assert '"▶  PLAY"' in source
-    assert 'gameProcesses.StateFor(LaunchPath(app))' in source
+    assert 'var state = StateFor(app);' in source and 'elevatedGames' in source
 
 
 def test_stop_requires_confirmation_and_never_uses_a_name_only_kill():
@@ -52,12 +52,12 @@ def test_stop_requires_confirmation_and_never_uses_a_name_only_kill():
 
 def test_signing_release_keeps_same_three_executable_format_and_new_version():
     workflow = (ROOT / '.github/workflows/release.yml').read_text()
-    assert "$version = '0.5.7'" in workflow
+    assert "$version = '0.5.8'" in workflow
     assert 'osslsigncode' in workflow
     assert 'HOMEWATCH_SIGNING_PFX_BASE64' in workflow
     for name in ('HomeWatchAgent.exe', 'HomeWatchService.exe', 'HomeWatchUpdater.exe'):
         assert name in workflow
-    assert '<Version>0.5.7</Version>' in (AGENT / 'HomeWatchAgent.csproj').read_text()
+    assert '<Version>0.5.8</Version>' in (AGENT / 'HomeWatchAgent.csproj').read_text()
 
 
 def test_running_game_cannot_be_uninstalled_from_launcher():
