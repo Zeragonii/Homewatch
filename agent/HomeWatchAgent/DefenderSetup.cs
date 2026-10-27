@@ -120,8 +120,8 @@ internal sealed class DefenderSetupForm : Form
     {
         Text = "HomeWatch — Administrator performance settings";
         StartPosition = FormStartPosition.CenterScreen;
-        Size = new Size(735, 500);
-        MinimumSize = new Size(640, 420);
+        Size = new Size(735, 535);
+        MinimumSize = new Size(640, 465);
         BackColor = Color.FromArgb(12, 20, 35);
         ForeColor = Color.White;
         Font = new Font("Segoe UI", 10);
@@ -132,7 +132,8 @@ internal sealed class DefenderSetupForm : Form
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 37));
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 46));
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 38));
+        // Two explicitly visible action rows; the old 38px single row hid the broker button.
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 86));
 
         root.Controls.Add(new Label
         {
@@ -157,24 +158,32 @@ internal sealed class DefenderSetupForm : Form
         root.Controls.Add(folderRow, 0, 2);
         result.Text = "No changes have been made. Choose an action below to review the selected folders.";
         root.Controls.Add(result, 0, 3);
-        var actions = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight };
+        var actions = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2, Margin = Padding.Empty, Padding = Padding.Empty };
+        actions.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
+        actions.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
+        var securityActions = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight,
+            WrapContents = false, Margin = Padding.Empty, AutoScroll = true };
+        var brokerActions = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight,
+            WrapContents = false, Margin = Padding.Empty, AutoScroll = true };
         add.Click += async (_, _) => await Apply("Add");
         remove.Click += async (_, _) => await Apply("Remove");
-        actions.Controls.Add(add);
-        actions.Controls.Add(remove);
+        securityActions.Controls.Add(add);
+        securityActions.Controls.Add(remove);
         var signing = new Button { Text = "Signing certificate...", Width = 180, Height = 34 };
         signing.Click += (_, _) => { using var dialog = new SigningCertificateForm(); dialog.ShowDialog(this); };
-        actions.Controls.Add(signing);
+        securityActions.Controls.Add(signing);
         var broker = new Button { Text = "Installer broker setup...", Width = 190, Height = 34 };
         broker.Click += (_, _) =>
         {
             try { InstallerBrokerClient.ConfigureWithAdministrator(); }
             catch (Exception ex) { MessageBox.Show(this, ex.Message, "Installer broker", MessageBoxButtons.OK, MessageBoxIcon.Warning); }
         };
-        actions.Controls.Add(broker);
+        brokerActions.Controls.Add(broker);
         var close = new Button { Text = "Close", Width = 95, Height = 34 };
         close.Click += (_, _) => Close();
-        actions.Controls.Add(close);
+        brokerActions.Controls.Add(close);
+        actions.Controls.Add(securityActions, 0, 0);
+        actions.Controls.Add(brokerActions, 0, 1);
         root.Controls.Add(actions, 0, 4);
         Controls.Add(root);
     }

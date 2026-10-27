@@ -311,3 +311,7 @@ See [RELEASE-v0.5.8.md](RELEASE-v0.5.8.md). The Web UI now has independent eleva
 ### v0.5.9 protected installer broker foundation
 
 See [RELEASE-v0.5.9.md](RELEASE-v0.5.9.md). Adds a dedicated signed staging service and admin-reviewed HTTPS device pin. The interactive installer still requires local UAC; no SYSTEM desktop execution is enabled.
+
+### v0.5.9a — Broker button visibility fix
+
+See [RELEASE-v0.5.9a.md](RELEASE-v0.5.9a.md) for the two-row admin settings fix and the one-time broker service installation requirement.

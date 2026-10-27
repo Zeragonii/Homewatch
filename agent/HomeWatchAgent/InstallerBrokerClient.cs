@@ -14,7 +14,7 @@ internal static class InstallerBrokerClient
     internal static void ConfigureWithAdministrator()
     {
         string exe = Path.Combine(AppContext.BaseDirectory, "HomeWatchInstallerBroker.exe");
-        if (!File.Exists(exe)) throw new IOException("Install v0.5.9 first to register the broker service");
+        if (!File.Exists(exe)) throw new IOException("Install HomeWatch v0.5.9 or newer as administrator once to add the broker service (the normal auto-updater cannot install this new service)");
         // This is a one-time local administrative enrolment, not a server command.
         Process.Start(new ProcessStartInfo(exe) { UseShellExecute = true, Verb = "runas",
             Arguments = "--enrol", WorkingDirectory = AppContext.BaseDirectory });
