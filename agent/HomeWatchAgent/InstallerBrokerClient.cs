@@ -52,7 +52,7 @@ internal static class InstallerBrokerClient
     }
 
     internal static async Task<int> InstallElevatedAsync(int catalogueId, Action<string> progress,
-        CancellationToken cancellation)
+        CancellationToken cancellation, Action? protectedCopyReady = null)
     {
         if (catalogueId <= 0) throw new ArgumentException("Invalid catalogue ID");
         // A child can grant desktop access to ONLY the specific broker-created
@@ -67,6 +67,9 @@ internal static class InstallerBrokerClient
             !Guid.TryParseExact(reply[8..], "N", out _))
             throw new IOException("Broker did not confirm elevated installer launch: " + reply);
         string ticket = reply[8..];
+        // STARTED is sent only after the broker has completed its own verified
+        // protected copy. The normal user's downloaded cache is no longer needed.
+        protectedCopyReady?.Invoke();
         progress("Elevated installer is open — follow the setup wizard.");
         while (true)
         {

@@ -104,5 +104,5 @@ def test_windows_agent_scheduler_is_standalone_and_release_version():
     assert 'Math.Clamp((now - lastTick).TotalSeconds, 0, 5)' in scheduler
     assert 'FiredScheduledSlots' in scheduler
     assert 'snoozed' in scheduler and 'acknowledged' in scheduler
-    assert (root/'agent/HomeWatchAgent/HomeWatchAgent.csproj').read_text().find('<Version>0.6.0</Version>') >= 0
-    assert "$version = '0.6.0'" in (root/'.github/workflows/release.yml').read_text()
+    assert (root/'agent/HomeWatchAgent/HomeWatchAgent.csproj').read_text().find('<Version>0.6.1</Version>') >= 0
+    assert "$version = '0.6.1'" in (root/'.github/workflows/release.yml').read_text()

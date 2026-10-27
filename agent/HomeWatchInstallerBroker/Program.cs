@@ -167,15 +167,18 @@ internal static class BrokerSettings
 internal sealed class BrokerWorker(ILogger<BrokerWorker> log) : BackgroundService
 {
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, InstallationRun> Runs = new();
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> CopyingStages = new();
     private static readonly SemaphoreSlim LaunchLock = new(1, 1);
+    private static readonly TimeSpan InstallerExitGrace = TimeSpan.FromMinutes(2);
+    private static readonly TimeSpan AbandonedStageAge = TimeSpan.FromHours(24);
     private sealed class InstallationRun
     {
         internal required string Sid { get; init; }
         internal required uint Session { get; init; }
         internal volatile bool Complete;
         internal int ExitCode;
-        internal DateTimeOffset Created = DateTimeOffset.UtcNow;
     }
+
     private static async Task MonitorAsync(string ticket, RunnerIdentity.LaunchedInstaller installed, string stagedExe)
     {
         try
@@ -194,19 +197,104 @@ internal sealed class BrokerWorker(ILogger<BrokerWorker> log) : BackgroundServic
         }
         finally
         {
+            // Keep the status ticket available for a while after process exit.
+            // Cleanup is independent of the IPC connection or launcher lifetime.
             _ = Task.Run(async () =>
             {
-                // Installers may spawn helpers that continue reading their
-                // package after the main wizard exits: allow a grace period.
-                await Task.Delay(TimeSpan.FromMinutes(40));
-                Runs.TryRemove(ticket, out _);
-                try { CleanupStage(stagedExe); }
-                catch (Exception error) { BrokerSettings.Audit("stage-cleanup-failed " + error.Message); }
+                try
+                {
+                    await Task.Delay(InstallerExitGrace);
+                    await RetryCleanupAsync(stagedExe);
+                }
+                finally { Runs.TryRemove(ticket, out _); }
             });
         }
     }
+
+    private static async Task RetryCleanupAsync(string stagedExe)
+    {
+        // Some setup wizards spawn a second EXE and exit. Do not delete their
+        // payload while a process is still running directly from that stage.
+        // Locked files also remain for the next retry / service recovery sweep.
+        for (int attempt = 0; attempt < 120; attempt++)
+        {
+            try
+            {
+                if (!IsStageInUse(stagedExe))
+                {
+                    CleanupStage(stagedExe);
+                    return;
+                }
+            }
+            catch (Exception ex)
+            {
+                if (attempt == 0 || attempt % 10 == 0)
+                    BrokerSettings.Audit("stage-cleanup-retry " + ex.Message);
+            }
+            await Task.Delay(TimeSpan.FromMinutes(1));
+        }
+        BrokerSettings.Audit("stage-cleanup-deferred-to-maintenance " + stagedExe);
+    }
+
+    private static bool IsStageInUse(string stagedExe)
+    {
+        string directory = StageDirectory(stagedExe) ?? "";
+        if (directory.Length == 0) return true; // fail closed
+        foreach (var process in Process.GetProcesses())
+        {
+            using (process)
+            {
+                try
+                {
+                    if (process.MainModule?.FileName?.StartsWith(directory + Path.DirectorySeparatorChar,
+                        StringComparison.OrdinalIgnoreCase) == true)
+                        return true;
+                }
+                catch (System.ComponentModel.Win32Exception) { }
+                catch (InvalidOperationException) { }
+            }
+        }
+        return false;
+    }
+
+    private static async Task StageMaintenanceAsync(CancellationToken stop)
+    {
+        while (!stop.IsCancellationRequested)
+        {
+            try
+            {
+                if (Directory.Exists(BrokerSettings.Stage))
+                foreach (var directory in Directory.EnumerateDirectories(BrokerSettings.Stage))
+                {
+                    try
+                    {
+                        string name = Path.GetFileName(directory);
+                        if (!StageName.IsMatch(name) || CopyingStages.ContainsKey(directory) ||
+                            (File.GetAttributes(directory) & FileAttributes.ReparsePoint) != 0 ||
+                            Directory.GetCreationTimeUtc(directory) > DateTime.UtcNow - AbandonedStageAge ||
+                            Runs.Values.Any(run => !run.Complete)) continue;
+                        // Use the validated folder name to build an in-root path;
+                        // no caller-controlled cleanup paths are accepted.
+                        string placeholder = Path.Combine(directory, "setup.exe");
+                        if (!IsStageInUse(placeholder)) CleanupStage(placeholder);
+                    }
+                    catch (Exception ex) { BrokerSettings.Audit("stage-maintenance-error " + ex.Message); }
+                }
+            }
+            catch (Exception ex) { BrokerSettings.Audit("stage-maintenance-enumeration-error " + ex.Message); }
+            try { await Task.Delay(TimeSpan.FromMinutes(30), stop); }
+            catch (OperationCanceledException) { return; }
+        }
+    }
+
+    private static readonly Regex StageName = new(@"^\d+-[a-f0-9]{64}-[a-f0-9]{32}$",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        // Recovery sweep also runs after service restarts, when any in-memory
+        // delayed deletion task from the previous service instance was lost.
+        _ = StageMaintenanceAsync(stoppingToken);
         // Fail closed on an unconfigured machine: do not accidentally trust the
         // ordinary user's modifiable server URL or enrollment credentials.
         while (!stoppingToken.IsCancellationRequested)
@@ -300,6 +388,14 @@ internal sealed class BrokerWorker(ILogger<BrokerWorker> log) : BackgroundServic
             if (!execute)
             {
                 string prepared = await StageApprovedAsync(sid, id, stop);
+                // Compatibility with the earlier stage-only protocol. New
+                // clients use RUN; older stage-only packages are reaped after
+                // an extended timeout or by the restart-recovery sweep.
+                _ = Task.Run(async () =>
+                {
+                    await Task.Delay(TimeSpan.FromHours(6));
+                    await RetryCleanupAsync(prepared);
+                });
                 await writer.WriteLineAsync("OK " + prepared);
                 BrokerSettings.Audit("approved-stage catalogue=" + id + " sid=" + sid);
                 return;
@@ -314,16 +410,32 @@ internal sealed class BrokerWorker(ILogger<BrokerWorker> log) : BackgroundServic
             try
             {
                 string entry = await StageApprovedAsync(sid, id, stop);
-                // Revoke permission before a long download completes: a
-                // second pinned-server policy check occurs IMMEDIATELY before launch.
-                await VerifyReadyToLaunchAsync(id, entry, stop);
-                RunnerIdentity.LaunchedInstaller installed = RunnerIdentity.Launch(entry, session);
-                string ticket = Guid.NewGuid().ToString("N");
-                Runs[ticket] = new InstallationRun { Sid = sid, Session = session };
-                _ = MonitorAsync(ticket, installed, entry);
-                await writer.WriteLineAsync("STARTED " + ticket);
-                BrokerSettings.Audit("approved-launch catalogue=" + id + " sid=" + sid +
-                    " session=" + session + " pid=" + installed.Pid + " ticket=" + ticket);
+                bool launched = false;
+                try
+                {
+                    // Revoke permission before a long download completes: a
+                    // second pinned-server policy check occurs IMMEDIATELY before launch.
+                    await VerifyReadyToLaunchAsync(id, entry, stop);
+                    RunnerIdentity.LaunchedInstaller installed = RunnerIdentity.Launch(entry, session);
+                    launched = true;
+                    string ticket = Guid.NewGuid().ToString("N");
+                    Runs[ticket] = new InstallationRun { Sid = sid, Session = session };
+                    _ = MonitorAsync(ticket, installed, entry);
+                    await writer.WriteLineAsync("STARTED " + ticket);
+                    BrokerSettings.Audit("approved-launch catalogue=" + id + " sid=" + sid +
+                        " session=" + session + " pid=" + installed.Pid + " ticket=" + ticket);
+                }
+                catch
+                {
+                    if (!launched)
+                    {
+                        // No process is using this protected copy; clean it
+                        // immediately on revoked approval or launch failure.
+                        try { CleanupStage(entry); }
+                        catch (Exception ex) { BrokerSettings.Audit("failed-launch-cleanup " + ex.Message); }
+                    }
+                    throw;
+                }
             }
             finally { LaunchLock.Release(); }
         }
@@ -391,19 +503,45 @@ internal sealed class BrokerWorker(ILogger<BrokerWorker> log) : BackgroundServic
             throw new IOException("Approved setup executable hash changed");
     }
 
-    private static void CleanupStage(string stagedExe)
+    private static string? StageDirectory(string stagedExe)
     {
         string root = Path.GetFullPath(BrokerSettings.Stage);
-        string relative = Path.GetRelativePath(root, stagedExe);
-        if (relative.StartsWith("..", StringComparison.Ordinal) || Path.IsPathRooted(relative)) return;
+        string relative = Path.GetRelativePath(root, Path.GetFullPath(stagedExe));
+        if (Path.IsPathRooted(relative) || relative.StartsWith("..", StringComparison.Ordinal)) return null;
         string folderName = relative.Split(Path.DirectorySeparatorChar)[0];
-        if (!Regex.IsMatch(folderName, @"^\d+-[a-f0-9]{64}-[a-f0-9]{32}$", RegexOptions.IgnoreCase)) return;
+        if (!StageName.IsMatch(folderName)) return null;
         string directory = Path.GetFullPath(Path.Combine(root, folderName));
-        if (!directory.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) ||
-            !Directory.Exists(directory) ||
+        return directory.StartsWith(root + Path.DirectorySeparatorChar,
+            StringComparison.OrdinalIgnoreCase) ? directory : null;
+    }
+
+    private static void CleanupStage(string stagedExe)
+    {
+        string? directory = StageDirectory(stagedExe);
+        if (directory is null || !Directory.Exists(directory)) return;
+        if (CopyingStages.ContainsKey(directory) ||
             (File.GetAttributes(directory) & FileAttributes.ReparsePoint) != 0) return;
-        Directory.Delete(directory, recursive: true);
-        BrokerSettings.Audit("cleaned-stage " + folderName);
+        // Never follow junctions or symlinks, even if the elevated installer
+        // created one inside its own private stage.
+        DeleteStageTree(directory);
+        BrokerSettings.Audit("cleaned-stage " + Path.GetFileName(directory));
+    }
+
+    private static void DeleteStageTree(string directory)
+    {
+        foreach (string member in Directory.EnumerateFileSystemEntries(directory))
+        {
+            var attrs = File.GetAttributes(member);
+            if ((attrs & FileAttributes.Directory) != 0)
+            {
+                if ((attrs & FileAttributes.ReparsePoint) != 0)
+                    Directory.Delete(member, recursive: false);
+                else
+                    DeleteStageTree(member);
+            }
+            else File.Delete(member);
+        }
+        Directory.Delete(directory, recursive: false);
     }
 
     private static bool SafeRelative(string path) =>
@@ -462,6 +600,7 @@ internal sealed class BrokerWorker(ILogger<BrokerWorker> log) : BackgroundServic
         // Unique folder per operation, inherited protected Program Files ACLs.
         string target = Path.Combine(BrokerSettings.Stage, id + "-" + digest + "-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(target);
+        CopyingStages.TryAdd(target, 0);
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         long total = 0;
         try
@@ -508,8 +647,13 @@ internal sealed class BrokerWorker(ILogger<BrokerWorker> log) : BackgroundServic
         }
         catch
         {
-            try { Directory.Delete(target, true); } catch { }
+            // Copy is finished (even if it failed). Remove temporary files;
+            // if Windows has a handle open, the recovery sweep will retry.
+            CopyingStages.TryRemove(target, out _);
+            try { CleanupStage(Path.Combine(target, entry)); }
+            catch (Exception ex) { BrokerSettings.Audit("stage-copy-cleanup-error " + ex.Message); }
             throw;
         }
+        finally { CopyingStages.TryRemove(target, out _); }
     }
 }

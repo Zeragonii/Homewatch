@@ -1,3 +1,9 @@
+# HomeWatch v0.6.1 — installer cache lifecycle and recovery
+
+HomeWatch now cleans the per-user download cache automatically after setup closes, including after non-successful setup and game-detection flows when it is safe to do so. The privileged installer broker cleans its own separate protected copy a short time after the wizard exits, retries while helpers are active or files are locked, and prunes abandoned staging folders after a service restart. Older unclaimed user download folders are also pruned when the Launcher opens. **Run the new signed Windows installer once as administrator to upgrade the broker service**; the three-binary automatic update only upgrades the launcher, not the broker. See [RELEASE-v0.6.1.md](RELEASE-v0.6.1.md).
+
+---
+
 # HomeWatch v0.6.0 — interactive installer elevation
 
 Parent-authorised household software installations can now run their **normal GUI installer elevated without requesting the child's administrator password**. The dedicated, pinned-HTTPS installer broker uses a locally provisioned administrator identity; no SYSTEM GUI, arbitrary command runner, or change to the signed three-file updater. **Requires a one-time administrator-run Windows installer upgrade and local broker enrolment.** Read [RELEASE-v0.6.0.md](RELEASE-v0.6.0.md) before enabling it, including the delegated administrator privilege implications and first-client test procedure.

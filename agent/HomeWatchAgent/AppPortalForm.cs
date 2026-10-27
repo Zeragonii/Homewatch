@@ -110,7 +110,14 @@ public sealed class AppPortalForm : Form
         gameStateTimer.Start();
         timer = new System.Windows.Forms.Timer { Interval = 12000 };
         timer.Tick += async (_, _) => await LoadAppsAsync();
-        Shown += async (_, _) => { timer.Start(); await LoadAppsAsync(); };
+        Shown += async (_, _) =>
+        {
+            timer.Start();
+            // Run before showing catalogue tiles so old-cache pruning cannot
+            // race a newly started download. Never block the UI thread.
+            await Task.Run(() => InstallerCacheMaintenance.PruneAbandoned());
+            await LoadAppsAsync();
+        };
         FormClosed += (_, _) => { timer.Stop(); timer.Dispose(); gameStateTimer.Stop(); gameStateTimer.Dispose(); http.Dispose(); DisposePosterImages(); };
     }
 
@@ -748,6 +755,10 @@ public sealed class AppPortalForm : Form
         installing = true;
         button.Enabled = false;
         string auditStatus = "failed", auditDetail = "";
+        // Broker staging reads the user cache until RUN returns STARTED.
+        // If the broker request fails mid-copy, leave it for stale-cache
+        // recovery rather than deleting files a privileged copy may be reading.
+        bool cacheSafeToRemove = true;
         using var cancel = new CancellationTokenSource();
         using var progressDialog = new Form
         {
@@ -793,15 +804,16 @@ public sealed class AppPortalForm : Form
             if (item.ElevateInstaller)
             {
                 if (!InstallerBrokerClient.IsInstalled)
-                    throw new IOException("The signed v0.6.0 installer broker is not installed. Run the v0.6.0 Windows installer as administrator once.");
+                    throw new IOException("The signed v0.6.1 installer broker is not installed. Run the v0.6.1 Windows installer as administrator once.");
                 // Never execute the child-writable cache with elevated privileges.
                 // The service independently fetches permission, verifies the
                 // complete package, and runs from a protected Program Files copy.
                 footer.Text = "Requesting your parent's approved administrator installation…";
+                cacheSafeToRemove = false;
                 installerExit = await InstallerBrokerClient.InstallElevatedAsync(item.Id, status =>
                 {
                     if (!IsDisposed) footer.Text = status;
-                }, cancel.Token);
+                }, cancel.Token, () => cacheSafeToRemove = true);
             }
             else
             {
@@ -810,7 +822,9 @@ public sealed class AppPortalForm : Form
                 {
                     UseShellExecute = true, WorkingDirectory = Path.GetDirectoryName(exe) ?? ""
                 }) ?? throw new IOException("Windows could not launch the installer");
+                cacheSafeToRemove = false;
                 await process.WaitForExitAsync();
+                cacheSafeToRemove = true;
                 installerExit = process.ExitCode;
             }
             auditStatus = "started";
@@ -857,13 +871,8 @@ public sealed class AppPortalForm : Form
             await RegisterInstalledGameAsync(item, selected, before);
             auditStatus = "completed"; auditDetail = "Game executable located; launch approval requested";
             footer.Text = "Game installed! Your parent can now approve its Play button.";
-            if (MessageBox.Show(this, "Remove the copied installer files to free up disk space?\n\n" +
-                "The installed game will not be affected.", "Clean up installation files",
-                MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes)
-            {
-                try { Directory.Delete(Path.GetDirectoryName(exe)!, recursive: true); }
-                catch (Exception cleanupError) { footer.Text = "Installed; installer cache cleanup failed: " + cleanupError.Message; }
-            }
+            // Downloader cleanup happens in finally on success, detection
+            // failures and cancelled downloads; no prompt or manual action.
         }
         catch (OperationCanceledException)
         {
@@ -879,6 +888,11 @@ public sealed class AppPortalForm : Form
         }
         finally
         {
+            // Only delete after the unprivileged wizard exits, or once the
+            // broker confirms it has its separate fully verified copy. Never
+            // touch the installed game or the original SMB package.
+            if (cacheSafeToRemove && !InstallerCacheMaintenance.DeletePackage(item.Id, item.InstallerSha256))
+                if (!IsDisposed) footer.Text += " (Installer cache cleanup deferred.)";
             try
             {
                 using var audit = await http.PostAsJsonAsync($"agent/catalogue/{item.Id}/attempts",
@@ -905,6 +919,8 @@ public sealed class AppPortalForm : Form
             "Install from family library", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
         button.Enabled = false;
         string status = "failed", detail = "";
+        string? legacySha = null;
+        bool legacyCacheSafeToRemove = true;
         try
         {
             // Check the current published metadata immediately before opening the source.
@@ -916,6 +932,7 @@ public sealed class AppPortalForm : Form
             var source = current.InstallerPath;
             if (!System.Text.RegularExpressions.Regex.IsMatch(current.InstallerSha256, "^[a-f0-9]{64}$"))
                 throw new IOException("Invalid installer fingerprint.");
+            legacySha = current.InstallerSha256;
             var httpSource = Uri.TryCreate(source, UriKind.Absolute, out var url) &&
                 (url.Scheme == Uri.UriSchemeHttps || url.Scheme == Uri.UriSchemeHttp);
             if (!httpSource && !source.StartsWith(@"\\", StringComparison.Ordinal))
@@ -990,6 +1007,9 @@ public sealed class AppPortalForm : Form
             status = "started";
             detail = "Installer opened as the current Windows user";
             footer.Text = "Installer started! Follow its instructions. ✨";
+            legacyCacheSafeToRemove = false;
+            await process.WaitForExitAsync();
+            legacyCacheSafeToRemove = true;
         }
         catch (Exception ex)
         {
@@ -998,6 +1018,9 @@ public sealed class AppPortalForm : Form
         }
         finally
         {
+            if (legacyCacheSafeToRemove && legacySha != null &&
+                !InstallerCacheMaintenance.DeleteLegacy(legacySha) && !IsDisposed)
+                footer.Text += " (Installer cache cleanup deferred.)";
             try
             {
                 using var audit = await http.PostAsJsonAsync($"agent/catalogue/{app.CatalogueId}/attempts",
