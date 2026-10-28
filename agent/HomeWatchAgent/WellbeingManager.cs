@@ -208,18 +208,33 @@ internal sealed class WellbeingManager : IDisposable
 
     private async Task RunReminderAsync(WellbeingRule rule)
     {
-        string result = "acknowledged";
+        // A failed popup is not an acknowledgement. Retain a pending prompt so
+        // a transient WinForms failure cannot silently dismiss a child's break.
+        string result = "failed";
         try { result = await WellbeingPopup.ShowAsync(rule); }
         catch (Exception ex) { log("Wellbeing popup: " + ex.Message); }
-        var state = GetState(rule);
-        if (result == "snoozed" && rule.AllowSnooze)
+        try
         {
-            state.SnoozePending = true;
-            state.SnoozedUntil = DateTime.UtcNow.AddMinutes(rule.SnoozeMinutes);
+            var state = GetState(rule);
+            if (result == "snoozed" && rule.AllowSnooze)
+            {
+                state.SnoozePending = true;
+                state.SnoozedUntil = DateTime.UtcNow.AddMinutes(rule.SnoozeMinutes);
+                EnqueueEvent(rule.Id, "snoozed");
+            }
+            else if (result == "acknowledged")
+            {
+                EnqueueEvent(rule.Id, "acknowledged");
+            }
+            else
+            {
+                state.SnoozePending = true;
+                state.SnoozedUntil = DateTime.UtcNow.AddSeconds(30);
+                log("Wellbeing popup did not complete; reminder will be retried.");
+            }
+            Save();
         }
-        EnqueueEvent(rule.Id, result == "snoozed" ? "snoozed" : "acknowledged");
-        Save();
-        showing = false;
+        finally { showing = false; }
     }
 
     private async Task RefreshRulesAsync()
@@ -330,6 +345,9 @@ internal sealed class WellbeingEventDto
 internal sealed class WellbeingPopup : Form
 {
     private string choice = "acknowledged";
+    private readonly System.Windows.Forms.Timer foregroundRetry = new() { Interval = 350 };
+    private int foregroundAttempts;
+    private bool completed;
     public string Choice => choice;
 
     public WellbeingPopup(WellbeingRule rule)
@@ -340,6 +358,8 @@ internal sealed class WellbeingPopup : Form
         MinimumSize = new Size(455, 350);
         FormBorderStyle = FormBorderStyle.FixedDialog;
         ControlBox = false;
+        MaximizeBox = false;
+        MinimizeBox = false;
         TopMost = true;
         ShowInTaskbar = true;
         BackColor = Color.FromArgb(18, 29, 47);
@@ -369,20 +389,54 @@ internal sealed class WellbeingPopup : Form
         var done = new Button { Text = "Done!", Width = 175, Height = 45, BackColor = Color.FromArgb(45, 155, 118),
             ForeColor = Color.White, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI Semibold", 11, FontStyle.Bold) };
         done.FlatAppearance.BorderSize = 0;
-        done.Click += (_, _) => { choice = "acknowledged"; Close(); };
+        done.Click += (_, _) => { choice = "acknowledged"; completed = true; Close(); };
         buttons.Controls.Add(done);
         if (rule.AllowSnooze)
         {
             var snooze = new Button { Text = $"In {rule.SnoozeMinutes} minutes", Width = 185, Height = 45,
                 BackColor = Color.FromArgb(43, 58, 83), ForeColor = Color.White, FlatStyle = FlatStyle.Flat };
             snooze.FlatAppearance.BorderSize = 0;
-            snooze.Click += (_, _) => { choice = "snoozed"; Close(); };
+            snooze.Click += (_, _) => { choice = "snoozed"; completed = true; Close(); };
             buttons.Controls.Add(snooze);
         }
         root.Controls.Add(buttons, 0, 4);
         Controls.Add(root);
         AcceptButton = done;
-        Shown += (_, _) => { Activate(); BringToFront(); };
+        // Match the parent Alert/Question windows: WinForms TopMost alone does
+        // not reliably take foreground focus away from a running game.
+        FormClosing += (_, e) => { if (!completed) e.Cancel = true; };
+        Shown += (_, _) =>
+        {
+            ForceForeground();
+            done.Focus();
+            foregroundRetry.Start();
+        };
+        Activated += (_, _) =>
+        {
+            if (IsHandleCreated) NativeMethods.PinTopmost(Handle);
+        };
+        foregroundRetry.Tick += (_, _) =>
+        {
+            foregroundAttempts++;
+            ForceForeground();
+            if (foregroundAttempts >= 6) foregroundRetry.Stop();
+        };
+    }
+
+    private void ForceForeground()
+    {
+        if (!IsHandleCreated || IsDisposed) return;
+        NativeMethods.PinTopmost(Handle);
+        NativeMethods.ShowWindow(Handle, NativeMethods.SW_RESTORE);
+        NativeMethods.SetForegroundWindow(Handle);
+        Activate();
+        BringToFront();
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing) foregroundRetry.Dispose();
+        base.Dispose(disposing);
     }
 
     public static Task<string> ShowAsync(WellbeingRule rule)

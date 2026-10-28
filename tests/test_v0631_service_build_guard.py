@@ -1,4 +1,4 @@
-"""Regression for the GitHub Actions 0.6.3.1 C# safety-check failure."""
+"""Regression for the GitHub Actions 0.6.3.2 C# safety-check failure."""
 
 from pathlib import Path
 import re
@@ -20,4 +20,4 @@ def test_sc_process_start_checks_null_explicitly():
 def test_bridge_stays_three_executables():
     assert "@('HomeWatchAgent.exe', 'HomeWatchService.exe', 'HomeWatchUpdater.exe')" in WORKFLOW
     assert 'HomeWatchInstallerBroker-win-x64.exe' in WORKFLOW
-    assert "$version = '0.6.3.1'" in WORKFLOW
+    assert "$version = '0.6.3.2'" in WORKFLOW

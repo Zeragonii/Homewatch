@@ -21,5 +21,5 @@ def test_broker_is_local_admin_entrypoint_not_remote():
 
 
 def test_numeric_patch_version():
-    assert '<Version>0.6.3.1</Version>' in (ROOT / 'agent/HomeWatchAgent/HomeWatchAgent.csproj').read_text()
-    assert "$version = '0.6.3.1'" in (ROOT / '.github/workflows/release.yml').read_text()
+    assert '<Version>0.6.3.2</Version>' in (ROOT / 'agent/HomeWatchAgent/HomeWatchAgent.csproj').read_text()
+    assert "$version = '0.6.3.2'" in (ROOT / '.github/workflows/release.yml').read_text()
