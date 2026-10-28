@@ -1,6 +1,6 @@
-# HomeWatch v0.6.1 — installer cache lifecycle and recovery
+# HomeWatch v0.6.2 — Storage Cleanup in HomeWatch Launcher
 
-HomeWatch now cleans the per-user download cache automatically after setup closes, including after non-successful setup and game-detection flows when it is safe to do so. The privileged installer broker cleans its own separate protected copy a short time after the wizard exits, retries while helpers are active or files are locked, and prunes abandoned staging folders after a service restart. Older unclaimed user download folders are also pruned when the Launcher opens. **Run the new signed Windows installer once as administrator to upgrade the broker service**; the three-binary automatic update only upgrades the launcher, not the broker. See [RELEASE-v0.6.1.md](RELEASE-v0.6.1.md).
+HomeWatch now shows cached/downloaded installer storage and a child-facing **Storage Cleanup** action in the normal Launcher, alongside automatic cache maintenance. It cleans the per-user download cache automatically after setup closes, including after non-successful setup and game-detection flows when it is safe to do so. The privileged installer broker cleans its own separate protected copy a short time after the wizard exits, retries while helpers are active or files are locked, and prunes abandoned staging folders after a service restart. Older unclaimed user download folders are also pruned when the Launcher opens. **Run the new signed Windows installer once as administrator to upgrade the broker service**; the three-binary automatic update only upgrades the launcher, not the broker. See [RELEASE-v0.6.2.md](RELEASE-v0.6.2.md).
 
 ---
 

@@ -84,6 +84,32 @@ internal static class InstallerBrokerClient
         }
     }
 
+    // No privileged paths, arbitrary delete requests or user-supplied filenames
+    // are sent across the pipe. The broker owns its staging tree and chooses
+    // exactly which old and inactive stages can be removed.
+    internal sealed record BrokerStorage(long TotalBytes, long EligibleBytes);
+
+    internal static async Task<BrokerStorage> GetStorageAsync(CancellationToken cancellation)
+    {
+        var reply = await RequestAsync("STORAGE", cancellation);
+        var parts = reply.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length != 3 || parts[0] != "STORAGE" ||
+            !long.TryParse(parts[1], out var total) || !long.TryParse(parts[2], out var eligible) ||
+            total < 0 || eligible < 0 || eligible > total)
+            throw new IOException("Unexpected broker storage response");
+        return new BrokerStorage(total, eligible);
+    }
+
+    internal static async Task<long> CleanStorageAsync(CancellationToken cancellation)
+    {
+        var reply = await RequestAsync("CLEAN", cancellation);
+        var parts = reply.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length != 2 || parts[0] != "CLEANED" ||
+            !long.TryParse(parts[1], out var freed) || freed < 0)
+            throw new IOException("Unexpected broker cleanup response");
+        return freed;
+    }
+
     internal static async Task<string> PrepareAsync(int catalogueId, CancellationToken cancellation)
     {
         if (catalogueId <= 0) throw new ArgumentException("Invalid catalogue ID");

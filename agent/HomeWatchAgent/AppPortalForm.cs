@@ -26,6 +26,9 @@ public sealed class AppPortalForm : Form
     private readonly Label footer;
     private readonly System.Windows.Forms.Timer timer;
     private readonly System.Windows.Forms.Timer gameStateTimer;
+    private readonly System.Windows.Forms.Timer storageTimer;
+    private readonly Button storageButton;
+    private bool checkingStorage;
     private readonly GameProcessTracker gameProcesses = new();
     private Button? currentPrimaryButton;
     private Label? currentPrimaryStatus;
@@ -94,11 +97,21 @@ public sealed class AppPortalForm : Form
             TextAlign = ContentAlignment.MiddleLeft, ForeColor = Muted, AutoEllipsis = true };
         var footerRow = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, BackColor = Background };
         footerRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        footerRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 205));
         footerRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 185));
+        footerRow.ColumnCount = 3;
         footerRow.Controls.Add(footer, 0, 0);
+        storageButton = ButtonFor("Storage · checking…", Surface, 198, 32);
+        storageButton.Click += async (_, _) =>
+        {
+            using var storage = new StorageCleanupForm(() => installing);
+            storage.ShowDialog(this);
+            await RefreshStorageBadgeAsync();
+        };
+        footerRow.Controls.Add(storageButton, 1, 0);
         var performanceButton = ButtonFor("Performance settings", Surface, 179, 32);
         performanceButton.Click += (_, _) => DefenderSetup.OpenWithUac();
-        footerRow.Controls.Add(performanceButton, 1, 0);
+        footerRow.Controls.Add(performanceButton, 2, 0);
         root.Controls.Add(footerRow, 0, 2);
         Controls.Add(root);
         ShowDetails(null);
@@ -108,6 +121,8 @@ public sealed class AppPortalForm : Form
         gameStateTimer = new System.Windows.Forms.Timer { Interval = 1500 };
         gameStateTimer.Tick += (_, _) => RefreshGameStates();
         gameStateTimer.Start();
+        storageTimer = new System.Windows.Forms.Timer { Interval = 45000 };
+        storageTimer.Tick += async (_, _) => await RefreshStorageBadgeAsync();
         timer = new System.Windows.Forms.Timer { Interval = 12000 };
         timer.Tick += async (_, _) => await LoadAppsAsync();
         Shown += async (_, _) =>
@@ -117,8 +132,39 @@ public sealed class AppPortalForm : Form
             // race a newly started download. Never block the UI thread.
             await Task.Run(() => InstallerCacheMaintenance.PruneAbandoned());
             await LoadAppsAsync();
+            storageTimer.Start();
+            await RefreshStorageBadgeAsync();
         };
-        FormClosed += (_, _) => { timer.Stop(); timer.Dispose(); gameStateTimer.Stop(); gameStateTimer.Dispose(); http.Dispose(); DisposePosterImages(); };
+        FormClosed += (_, _) => { timer.Stop(); timer.Dispose(); gameStateTimer.Stop(); gameStateTimer.Dispose(); storageTimer.Stop(); storageTimer.Dispose(); http.Dispose(); DisposePosterImages(); };
+    }
+
+    private async Task RefreshStorageBadgeAsync()
+    {
+        if (checkingStorage || IsDisposed || installing) return;
+        checkingStorage = true;
+        try
+        {
+            var user = await Task.Run(InstallerCacheMaintenance.GetUsage);
+            long total = user.TotalBytes;
+            bool brokerAvailable = false;
+            if (InstallerBrokerClient.IsInstalled)
+            {
+                try
+                {
+                    using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(12));
+                    var broker = await InstallerBrokerClient.GetStorageAsync(timeout.Token);
+                    total = checked(total + broker.TotalBytes);
+                    brokerAvailable = true;
+                }
+                catch { /* Keep user-cache value; do not claim the broker uses 0 bytes. */ }
+            }
+            if (!IsDisposed)
+                storageButton.Text = (brokerAvailable || !InstallerBrokerClient.IsInstalled)
+                    ? "Storage · " + StorageCleanupForm.SizeText(total)
+                    : "Storage · check details";
+        }
+        catch { if (!IsDisposed) storageButton.Text = "Storage cleanup…"; }
+        finally { checkingStorage = false; }
     }
 
     private static Button ButtonFor(string title, Color color, int width, int height)
@@ -759,6 +805,7 @@ public sealed class AppPortalForm : Form
         // If the broker request fails mid-copy, leave it for stale-cache
         // recovery rather than deleting files a privileged copy may be reading.
         bool cacheSafeToRemove = true;
+        IDisposable? cacheLease = null;
         using var cancel = new CancellationTokenSource();
         using var progressDialog = new Form
         {
@@ -775,6 +822,7 @@ public sealed class AppPortalForm : Form
         progressDialog.Show(this);
         try
         {
+            cacheLease = InstallerCacheMaintenance.AcquirePackageLease(item.Id, item.InstallerSha256);
             await InstallationStateAsync(item.Id, "copying");
             var exe = await HouseholdPackageInstaller.InstallAsync(item, message =>
             {
@@ -804,7 +852,7 @@ public sealed class AppPortalForm : Form
             if (item.ElevateInstaller)
             {
                 if (!InstallerBrokerClient.IsInstalled)
-                    throw new IOException("The signed v0.6.1 installer broker is not installed. Run the v0.6.1 Windows installer as administrator once.");
+                    throw new IOException("The signed v0.6.2 installer broker is not installed. Run the v0.6.2 Windows installer as administrator once.");
                 // Never execute the child-writable cache with elevated privileges.
                 // The service independently fetches permission, verifies the
                 // complete package, and runs from a protected Program Files copy.
@@ -893,6 +941,7 @@ public sealed class AppPortalForm : Form
             // touch the installed game or the original SMB package.
             if (cacheSafeToRemove && !InstallerCacheMaintenance.DeletePackage(item.Id, item.InstallerSha256))
                 if (!IsDisposed) footer.Text += " (Installer cache cleanup deferred.)";
+            cacheLease?.Dispose();
             try
             {
                 using var audit = await http.PostAsJsonAsync($"agent/catalogue/{item.Id}/attempts",
@@ -921,6 +970,7 @@ public sealed class AppPortalForm : Form
         string status = "failed", detail = "";
         string? legacySha = null;
         bool legacyCacheSafeToRemove = true;
+        IDisposable? legacyLease = null;
         try
         {
             // Check the current published metadata immediately before opening the source.
@@ -933,6 +983,7 @@ public sealed class AppPortalForm : Form
             if (!System.Text.RegularExpressions.Regex.IsMatch(current.InstallerSha256, "^[a-f0-9]{64}$"))
                 throw new IOException("Invalid installer fingerprint.");
             legacySha = current.InstallerSha256;
+            legacyLease = InstallerCacheMaintenance.AcquireLegacyLease(legacySha);
             var httpSource = Uri.TryCreate(source, UriKind.Absolute, out var url) &&
                 (url.Scheme == Uri.UriSchemeHttps || url.Scheme == Uri.UriSchemeHttp);
             if (!httpSource && !source.StartsWith(@"\\", StringComparison.Ordinal))
@@ -1021,6 +1072,7 @@ public sealed class AppPortalForm : Form
             if (legacyCacheSafeToRemove && legacySha != null &&
                 !InstallerCacheMaintenance.DeleteLegacy(legacySha) && !IsDisposed)
                 footer.Text += " (Installer cache cleanup deferred.)";
+            legacyLease?.Dispose();
             try
             {
                 using var audit = await http.PostAsJsonAsync($"agent/catalogue/{app.CatalogueId}/attempts",

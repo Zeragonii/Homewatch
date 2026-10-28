@@ -253,7 +253,7 @@ async function setGameElevation(digest,enabled){
   }catch(e){alert(e.message)}
 }
 async function setInstallerElevation(id,enabled){
-  if(enabled&&!confirm('Allow this exact installer package to run with administrator privileges on enrolled PCs? HomeWatch v0.6.1 can open its interactive wizard WITHOUT another UAC prompt. The installer will have broad administrator access, so approve only packages you trust.'))return;
+  if(enabled&&!confirm('Allow this exact installer package to run with administrator privileges on enrolled PCs? HomeWatch v0.6.2 can open its interactive wizard WITHOUT another UAC prompt. The installer will have broad administrator access, so approve only packages you trust.'))return;
   try{await api(`/api/catalogue/${id}/elevation`,{method:'PUT',body:JSON.stringify({enabled})});
     lastCatalogueSnapshot='';await loadCatalogue(true);
   }catch(e){alert(e.message)}

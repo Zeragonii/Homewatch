@@ -1,4 +1,5 @@
 using System.Text.RegularExpressions;
+using System.Security;
 
 namespace HomeWatchAgent;
 
@@ -20,6 +21,141 @@ internal static class InstallerCacheMaintenance
     internal static bool DeleteLegacy(string sha256) =>
         Regex.IsMatch(sha256 ?? "", "^[a-f0-9]{64}$", RegexOptions.IgnoreCase) &&
         TryDelete(Path.Combine(CacheRoot, "installers"), sha256, LegacyName);
+
+    // A lock outside the cache folder prevents other HomeWatch instances and
+    // the manual cleaner from removing a package during an active download or
+    // while the installer/broker may still be reading it. This is intentionally
+    // per *package*, not a global lock across the entire library.
+    internal static IDisposable AcquirePackageLease(int id, string digest) =>
+        AcquireLease("Packages", id + "-" + digest, PackageName)
+        ?? throw new IOException("This installer package is already being used by another HomeWatch session");
+
+    internal static IDisposable AcquireLegacyLease(string digest) =>
+        AcquireLease("installers", digest, LegacyName)
+        ?? throw new IOException("This installer is already being used by another HomeWatch session");
+
+    private static FileStream? AcquireLease(string category, string name, Regex pattern)
+    {
+        if (!pattern.IsMatch(name)) throw new IOException("Invalid HomeWatch cache identity");
+        string lockRoot = Path.Combine(CacheRoot, ".package-locks");
+        if (!SafeCacheParent(CacheRoot) || !SafeCacheParent(lockRoot))
+            throw new IOException("Unsafe HomeWatch cache directory");
+        Directory.CreateDirectory(lockRoot);
+        if (!SafeCacheParent(lockRoot)) throw new IOException("Unsafe cache lock directory");
+        string lockPath = Path.Combine(lockRoot, category + "-" + name + ".lock");
+        try
+        {
+            if (File.Exists(lockPath) &&
+                (File.GetAttributes(lockPath) & FileAttributes.ReparsePoint) != 0)
+                return null;
+            return new FileStream(lockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+        }
+        catch (IOException) { return null; }
+        catch (UnauthorizedAccessException) { return null; }
+    }
+
+    private static bool SafeCacheParent(string path) =>
+        !Directory.Exists(path) || (File.GetAttributes(path) & FileAttributes.ReparsePoint) == 0;
+
+    internal sealed record CacheUsage(long TotalBytes, long EligibleBytes, int FolderCount);
+    internal sealed record CacheCleanup(long FreedBytes, int RemovedFolders);
+    private static readonly TimeSpan ManualAge = TimeSpan.FromMinutes(10);
+
+    // Show total occupied cache size even when it is too new / in use to
+    // delete. Only strictly recognised cache folders are eligible.
+    internal static CacheUsage GetUsage()
+    {
+        long total = 0, eligible = 0;
+        int folders = 0;
+        foreach (var (category, regex) in new[] { ("Packages", PackageName), ("installers", LegacyName) })
+        {
+            string root = Path.Combine(CacheRoot, category);
+            if (!SafeCacheParent(CacheRoot) || !SafeCacheParent(root) || !Directory.Exists(root)) continue;
+            try
+            {
+                foreach (string path in Directory.EnumerateDirectories(root))
+                {
+                    string name = Path.GetFileName(path);
+                    if (!regex.IsMatch(name) || !SafeCacheParent(path)) continue;
+                    long bytes = TreeBytes(path);
+                    folders++;
+                    total = checked(total + bytes);
+                    if (Directory.GetLastWriteTimeUtc(path) < DateTime.UtcNow - ManualAge)
+                    {
+                        using var lease = AcquireLease(category, name, regex);
+                        if (lease != null) eligible = checked(eligible + bytes);
+                    }
+                }
+            }
+            catch (IOException) { } catch (UnauthorizedAccessException) { }
+        }
+        return new CacheUsage(total, eligible, folders);
+    }
+
+    // Manual cleanup never accepts filesystem paths from the UI. Never traverse
+    // links, touch the actual installed game directory, or remove a recent or
+    // locked package. The lease stays held until deletion is complete.
+    internal static CacheCleanup CleanNow()
+    {
+        long freed = 0;
+        int removed = 0;
+        foreach (var (category, regex) in new[] { ("Packages", PackageName), ("installers", LegacyName) })
+        {
+            string root = Path.Combine(CacheRoot, category);
+            if (!SafeCacheParent(CacheRoot) || !SafeCacheParent(root) || !Directory.Exists(root)) continue;
+            try
+            {
+                foreach (string path in Directory.EnumerateDirectories(root))
+                {
+                    string name = Path.GetFileName(path);
+                    if (!regex.IsMatch(name) || !SafeCacheParent(path)) continue;
+                    try
+                    {
+                        if (Directory.GetLastWriteTimeUtc(path) >= DateTime.UtcNow - ManualAge) continue;
+                        using var lease = AcquireLease(category, name, regex);
+                        if (lease is null) continue;
+                        long bytes = TreeBytes(path);
+                        if (TryDelete(root, name, regex))
+                        {
+                            freed = checked(freed + bytes);
+                            removed++;
+                        }
+                    }
+                    catch (IOException) { } catch (UnauthorizedAccessException) { }
+                }
+            }
+            catch (IOException) { } catch (UnauthorizedAccessException) { }
+        }
+        return new CacheCleanup(freed, removed);
+    }
+
+    private static long TreeBytes(string path)
+    {
+        long sum = 0;
+        var pending = new Stack<string>();
+        pending.Push(path);
+        while (pending.Count > 0)
+        {
+            string directory = pending.Pop();
+            try
+            {
+                if ((File.GetAttributes(directory) & FileAttributes.ReparsePoint) != 0) continue;
+                foreach (string member in Directory.EnumerateFileSystemEntries(directory))
+                {
+                    try
+                    {
+                        var attr = File.GetAttributes(member);
+                        if ((attr & FileAttributes.ReparsePoint) != 0) continue;
+                        if ((attr & FileAttributes.Directory) != 0) pending.Push(member);
+                        else sum = checked(sum + new FileInfo(member).Length);
+                    }
+                    catch (IOException) { } catch (UnauthorizedAccessException) { }
+                }
+            }
+            catch (IOException) { } catch (UnauthorizedAccessException) { }
+        }
+        return sum;
+    }
 
     private static bool TryDelete(string root, string name, Regex expected)
     {
@@ -86,7 +222,10 @@ internal static class InstallerCacheMaintenance
                     {
                         if ((File.GetAttributes(folder) & FileAttributes.ReparsePoint) == 0 &&
                             Directory.GetLastWriteTimeUtc(folder) < cutoff)
-                            TryDelete(root, name, pattern);
+                        {
+                            using var lease = AcquireLease(Path.GetFileName(root), name, pattern);
+                            if (lease != null) TryDelete(root, name, pattern);
+                        }
                     }
                     catch (IOException) { }
                     catch (UnauthorizedAccessException) { }

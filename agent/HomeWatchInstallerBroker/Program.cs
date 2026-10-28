@@ -177,6 +177,8 @@ internal sealed class BrokerWorker(ILogger<BrokerWorker> log) : BackgroundServic
         internal required uint Session { get; init; }
         internal volatile bool Complete;
         internal int ExitCode;
+        internal required string StagedExe { get; init; }
+        internal DateTime FinishedUtc;
     }
 
     private static async Task MonitorAsync(string ticket, RunnerIdentity.LaunchedInstaller installed, string stagedExe)
@@ -186,13 +188,13 @@ internal sealed class BrokerWorker(ILogger<BrokerWorker> log) : BackgroundServic
             using (installed)
             {
                 int code = await Task.Run(installed.WaitForExit);
-                if (Runs.TryGetValue(ticket, out var state)) { state.ExitCode = code; state.Complete = true; }
+                if (Runs.TryGetValue(ticket, out var state)) { state.ExitCode = code; state.FinishedUtc = DateTime.UtcNow; state.Complete = true; }
                 BrokerSettings.Audit("installer-exit ticket=" + ticket + " code=" + code);
             }
         }
         catch (Exception ex)
         {
-            if (Runs.TryGetValue(ticket, out var state)) { state.ExitCode = -1; state.Complete = true; }
+            if (Runs.TryGetValue(ticket, out var state)) { state.ExitCode = -1; state.FinishedUtc = DateTime.UtcNow; state.Complete = true; }
             BrokerSettings.Audit("installer-monitor-error ticket=" + ticket + " " + ex.Message);
         }
         finally
@@ -255,6 +257,108 @@ internal sealed class BrokerWorker(ILogger<BrokerWorker> log) : BackgroundServic
             }
         }
         return false;
+    }
+
+    private sealed record StageUsage(long TotalBytes, long EligibleBytes);
+    private static readonly TimeSpan UnknownStageGrace = TimeSpan.FromMinutes(15);
+    private static readonly SemaphoreSlim CleaningLock = new(1, 1);
+
+    // Stage directory names are minted by the broker and checked against an
+    // exact pattern. These commands never accept a path or catalogue ID.
+    private static IEnumerable<string> EnumerateStageFolders()
+    {
+        if (!Directory.Exists(BrokerSettings.Stage) ||
+            (File.GetAttributes(BrokerSettings.Stage) & FileAttributes.ReparsePoint) != 0)
+            return Array.Empty<string>();
+        return Directory.EnumerateDirectories(BrokerSettings.Stage)
+            .Where(d => StageName.IsMatch(Path.GetFileName(d)) &&
+                (File.GetAttributes(d) & FileAttributes.ReparsePoint) == 0).ToArray();
+    }
+
+    private static long StageTreeBytes(string path)
+    {
+        long bytes = 0;
+        var pending = new Stack<string>();
+        pending.Push(path);
+        while (pending.Count != 0)
+        {
+            string directory = pending.Pop();
+            try
+            {
+                if ((File.GetAttributes(directory) & FileAttributes.ReparsePoint) != 0) continue;
+                foreach (string entry in Directory.EnumerateFileSystemEntries(directory))
+                {
+                    try
+                    {
+                        var attrs = File.GetAttributes(entry);
+                        if ((attrs & FileAttributes.ReparsePoint) != 0) continue;
+                        if ((attrs & FileAttributes.Directory) != 0) pending.Push(entry);
+                        else bytes = checked(bytes + new FileInfo(entry).Length);
+                    }
+                    catch (IOException) { } catch (UnauthorizedAccessException) { }
+                }
+            }
+            catch (IOException) { } catch (UnauthorizedAccessException) { }
+        }
+        return bytes;
+    }
+
+    private static bool EligibleForManualCleanup(string directory)
+    {
+        if (CopyingStages.ContainsKey(directory)) return false;
+        if (Runs.Values.Any(r => !r.Complete)) return false;
+        var matching = Runs.Values.Where(r => string.Equals(StageDirectory(r.StagedExe), directory,
+            StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (matching.Length > 0)
+        {
+            if (matching.Any(r => !r.Complete ||
+                r.FinishedUtc == default || DateTime.UtcNow - r.FinishedUtc < InstallerExitGrace))
+                return false;
+        }
+        else if (Directory.GetLastWriteTimeUtc(directory) > DateTime.UtcNow - UnknownStageGrace)
+            return false;
+        // Also checks whether an installer child executable is still running.
+        return !IsStageInUse(Path.Combine(directory, "setup.exe"));
+    }
+
+    private static StageUsage GetStageUsage()
+    {
+        long total = 0, eligible = 0;
+        foreach (var folder in EnumerateStageFolders())
+        {
+            try
+            {
+                long bytes = StageTreeBytes(folder);
+                total = checked(total + bytes);
+                if (EligibleForManualCleanup(folder)) eligible = checked(eligible + bytes);
+            }
+            catch (IOException) { } catch (UnauthorizedAccessException) { }
+        }
+        return new StageUsage(total, eligible);
+    }
+
+    private static async Task<long> CleanStagesAsync(CancellationToken token)
+    {
+        await CleaningLock.WaitAsync(token);
+        try
+        {
+            long before = GetStageUsage().TotalBytes;
+            foreach (var folder in EnumerateStageFolders())
+            {
+                try
+                {
+                    if (EligibleForManualCleanup(folder))
+                        CleanupStage(Path.Combine(folder, "setup.exe"));
+                }
+                catch (IOException ex) { BrokerSettings.Audit("manual-stage-cleanup-skipped " + ex.Message); }
+                catch (UnauthorizedAccessException ex) { BrokerSettings.Audit("manual-stage-cleanup-skipped " + ex.Message); }
+            }
+            long after = GetStageUsage().TotalBytes;
+            long freed = Math.Max(0, before - after);
+            BrokerSettings.Audit("manual-stage-cleanup bytes=" + freed);
+            return freed;
+        }
+        finally { CleaningLock.Release(); }
     }
 
     private static async Task StageMaintenanceAsync(CancellationToken stop)
@@ -368,6 +472,18 @@ internal sealed class BrokerWorker(ILogger<BrokerWorker> log) : BackgroundServic
             }
             if (!Regex.IsMatch(sid, @"^S-1-5-21-(\d+-){3}\d+$"))
                 throw new UnauthorizedAccessException("Installer requests require a local Windows account");
+            if (line == "STORAGE")
+            {
+                var usage = await Task.Run(GetStageUsage, stop);
+                await writer.WriteLineAsync($"STORAGE {usage.TotalBytes} {usage.EligibleBytes}");
+                return;
+            }
+            if (line == "CLEAN")
+            {
+                long freed = await CleanStagesAsync(stop);
+                await writer.WriteLineAsync("CLEANED " + freed);
+                return;
+            }
             if (line == "IDENTITY")
             {
                 await writer.WriteLineAsync("ID " + RunnerIdentity.Sid);
@@ -419,7 +535,7 @@ internal sealed class BrokerWorker(ILogger<BrokerWorker> log) : BackgroundServic
                     RunnerIdentity.LaunchedInstaller installed = RunnerIdentity.Launch(entry, session);
                     launched = true;
                     string ticket = Guid.NewGuid().ToString("N");
-                    Runs[ticket] = new InstallationRun { Sid = sid, Session = session };
+                    Runs[ticket] = new InstallationRun { Sid = sid, Session = session, StagedExe = entry };
                     _ = MonitorAsync(ticket, installed, entry);
                     await writer.WriteLineAsync("STARTED " + ticket);
                     BrokerSettings.Audit("approved-launch catalogue=" + id + " sid=" + sid +
