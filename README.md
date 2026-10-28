@@ -1,6 +1,6 @@
-# HomeWatch v0.6.3 — Remote Broker Updates
+# HomeWatch v0.6.3.1 — Broker Update Build Hotfix
 
-The signed HomeWatch update service now upgrades **the installer broker as well**, so future changes to the privileged installer service do not require manually reinstalling HomeWatch. A compatibility bridge retains the original three-file updater ZIP and publishes the broker as a separate signed GitHub release asset. The updated service verifies the locally administrator-pinned publisher, checks the approved file version and hash, defers updates while installations are active, and atomically replaces/restarts the broker with a rollback backup. Existing broker credentials and enrolment are not changed. The initial administrator installation is still necessary only on machines where the broker was never installed. See [RELEASE-v0.6.3.md](RELEASE-v0.6.3.md).
+The signed HomeWatch update service now upgrades **the installer broker as well**, so future changes to the privileged installer service do not require manually reinstalling HomeWatch. A compatibility bridge retains the original three-file updater ZIP and publishes the broker as a separate signed GitHub release asset. The updated service verifies the locally administrator-pinned publisher, checks the approved file version and hash, defers updates while installations are active, and atomically replaces/restarts the broker with a rollback backup. Existing broker credentials and enrolment are not changed. The initial administrator installation is still necessary only on machines where the broker was never installed. See [RELEASE-v0.6.3.1.md](RELEASE-v0.6.3.1.md) for the bridge release and build hotfix.
 
 ---
 

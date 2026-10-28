@@ -1,5 +1,5 @@
 #ifndef MyAppVersion
-  #define MyAppVersion "0.6.3"
+  #define MyAppVersion "0.6.3.1"
 #endif
 #define MyAppName "HomeWatch Launcher"
 #define MyAppPublisher "HomeWatch"

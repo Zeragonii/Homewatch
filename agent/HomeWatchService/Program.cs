@@ -87,7 +87,7 @@ internal sealed class ReleaseWorker(ILogger<ReleaseWorker> log) : BackgroundServ
     private static HttpClient CreateHttp()
     {
         var h = new HttpClient { Timeout = TimeSpan.FromMinutes(5) };
-        h.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue("HomeWatch", "0.6.3"));
+        h.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue("HomeWatch", "0.6.3.1"));
         h.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/vnd.github+json"));
         return h;
     }
@@ -551,7 +551,9 @@ internal static class BrokerUpdate
             ArgumentList = { verb, name },
             UseShellExecute = false, CreateNoWindow = true,
             RedirectStandardOutput = true, RedirectStandardError = true
-        }) ?? throw new IOException("Could not start sc.exe");
+        });
+        if (process is null)
+            throw new IOException("Could not start sc.exe");
         string stdout = await process.StandardOutput.ReadToEndAsync();
         string stderr = await process.StandardError.ReadToEndAsync();
         await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(20));

@@ -51,6 +51,6 @@ def test_docker_is_http_only_unless_proxy_terminates_tls():
 
 
 def test_new_hotfix_numeric_versions_match():
-    version = "0.6.3"
+    version = "0.6.3.1"
     assert f'<Version>{version}</Version>' in (ROOT / 'agent/HomeWatchAgent/HomeWatchAgent.csproj').read_text()
     assert f"$version = '{version}'" in (ROOT / '.github/workflows/release.yml').read_text()
