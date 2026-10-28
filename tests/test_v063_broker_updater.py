@@ -63,7 +63,7 @@ def test_initial_install_still_sets_up_broker_service_and_keeps_unchanged_creden
     assert 'create HomeWatchInstallerBroker' in INSTALLER
     assert 'config HomeWatchInstallerBroker' in INSTALLER
     assert 'Source: "..\\..\\out\\agent\\HomeWatchInstallerBroker.exe"' in INSTALLER
-    assert '#define MyAppVersion "0.6.4"' in INSTALLER
+    assert '#define MyAppVersion "0.6.4.1"' in INSTALLER
 
 
 def test_stale_broker_updater_artifacts_are_narrowly_scavenged():

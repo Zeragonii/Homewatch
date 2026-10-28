@@ -42,9 +42,9 @@ def test_exclusions_require_explicit_local_administrator_action():
 
 
 def test_release_bumps_agent_not_server_api_contract():
-    assert '<Version>0.6.4</Version>' in (AGENT / 'HomeWatchAgent.csproj').read_text()
-    assert "$version = '0.6.4'" in (ROOT / '.github/workflows/release.yml').read_text()
-    assert '#define MyAppVersion "0.6.4"' in (ROOT / 'agent/installer/HomeWatchAgent.iss').read_text()
+    assert '<Version>0.6.4.1</Version>' in (AGENT / 'HomeWatchAgent.csproj').read_text()
+    assert "$version = '0.6.4.1'" in (ROOT / '.github/workflows/release.yml').read_text()
+    assert '#define MyAppVersion "0.6.4.1"' in (ROOT / 'agent/installer/HomeWatchAgent.iss').read_text()
     workflow = (ROOT / '.github/workflows/release.yml').read_text()
     for required in ('HomeWatchAgent.exe', 'HomeWatchService.exe', 'HomeWatchUpdater.exe'):
         assert required in workflow

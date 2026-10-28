@@ -57,6 +57,6 @@ def test_broker_service_upgrade_and_admin_account_uninstall():
     assert 'RunnerConfigExists' in ISS
     assert '--remove-runner' in ISS and 'RunnerIdentity.Remove()' in BROKER
     assert 'NetUserDel' in IDENTITY
-    assert "'0.6.4'" in WORKFLOW
+    assert "'0.6.4.1'" in WORKFLOW
     assert '@(\'HomeWatchAgent.exe\', \'HomeWatchService.exe\', \'HomeWatchUpdater.exe\')' in WORKFLOW
     assert 'public static readonly string[] Allowed = { "HomeWatchAgent.exe", "HomeWatchUpdater.exe", "HomeWatchService.exe" };' in (ROOT/'agent/HomeWatchService/Program.cs').read_text()

@@ -9,6 +9,7 @@ namespace HomeWatchAgent;
 internal static class PortableGameDeployment
 {
     private const long MaxBytes = 300L * 1024 * 1024 * 1024;
+    private const int MaxPortableFiles = 100_000;
     private const long FreeSpaceReserve = 1024L * 1024 * 1024;
 
     internal static async Task<string> DeployAsync(PortalCatalogueItem item, Action<string> progress,
@@ -17,7 +18,7 @@ internal static class PortableGameDeployment
         if (item.DeploymentType != "portable" || item.Manifest is null)
             throw new IOException("A published portable-game manifest is required");
         var manifest = item.Manifest;
-        if (manifest.Files.Count is < 1 or > 4000 || manifest.TotalBytes is < 0 or > MaxBytes ||
+        if (manifest.Files.Count is < 1 or > MaxPortableFiles || manifest.TotalBytes is < 0 or > MaxBytes ||
             !Regex.IsMatch(item.InstallerSha256, "^[a-f0-9]{64}$") ||
             !item.PackageRoot.StartsWith(@"\\", StringComparison.Ordinal))
             throw new IOException("Invalid published game package");

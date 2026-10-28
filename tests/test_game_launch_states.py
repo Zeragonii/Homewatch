@@ -52,12 +52,12 @@ def test_stop_requires_confirmation_and_never_uses_a_name_only_kill():
 
 def test_signing_release_keeps_same_three_executable_format_and_new_version():
     workflow = (ROOT / '.github/workflows/release.yml').read_text()
-    assert "$version = '0.6.4'" in workflow
+    assert "$version = '0.6.4.1'" in workflow
     assert 'osslsigncode' in workflow
     assert 'HOMEWATCH_SIGNING_PFX_BASE64' in workflow
     for name in ('HomeWatchAgent.exe', 'HomeWatchService.exe', 'HomeWatchUpdater.exe'):
         assert name in workflow
-    assert '<Version>0.6.4</Version>' in (AGENT / 'HomeWatchAgent.csproj').read_text()
+    assert '<Version>0.6.4.1</Version>' in (AGENT / 'HomeWatchAgent.csproj').read_text()
 
 
 def test_running_game_cannot_be_uninstalled_from_launcher():

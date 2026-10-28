@@ -1904,11 +1904,12 @@ def save_nas_config(body: NasConfigBody, db: Session = Depends(db_session)):
 
 
 @app.get('/api/nas/browse', dependencies=[Depends(require_admin)])
-def browse_nas(path: str = '', db: Session = Depends(db_session)):
+def browse_nas(path: str = '', offset: int = 0, db: Session = Depends(db_session)):
     root, user, pwd = get_nas_settings(db)
     try:
         relative = nas_library.validate_relative(path)
-        return {'root': root, 'path': relative, 'entries': nas_library.list_directory(root, relative, user, pwd)}
+        page = nas_library.list_directory_page(root, relative, user, pwd, offset=offset)
+        return {'root': root, 'path': relative, **page}
     except ValueError as e:
         raise HTTPException(400, str(e))
     except Exception as e:

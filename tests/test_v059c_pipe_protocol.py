@@ -30,4 +30,4 @@ def test_service_side_broker_update_requires_installer():
     assert 'Source: "..\\..\\out\\agent\\HomeWatchInstallerBroker.exe"' in iss
     assert "@('HomeWatchAgent.exe', 'HomeWatchService.exe', 'HomeWatchUpdater.exe')" in WORKFLOW
     assert 'HomeWatchInstallerBroker.exe' in WORKFLOW
-    assert "'0.6.4'" in WORKFLOW
+    assert "'0.6.4.1'" in WORKFLOW

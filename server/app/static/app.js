@@ -342,11 +342,11 @@ async function saveNasSettings(e){
     f.textContent=`Connected — ${found.entries.length} top-level entries found at ${n.root_unc}`;
   }catch(error){f.textContent='NAS access failed: '+error.message}
 }
-async function browseNas(path=''){
+async function browseNas(path='',offset=0){
   const display=document.getElementById('nasBrowseLocation');const files=document.getElementById('nasFiles');
   display.textContent='Opening NAS folder…'; files.replaceChildren();
   try{
-    const data=await api('/api/nas/browse?path='+encodeURIComponent(path));
+    const data=await api('/api/nas/browse?path='+encodeURIComponent(path)+'&offset='+offset);
     nasBrowsePath=data.path;
     display.textContent=data.root+(data.path?'\\'+data.path:'');
     if(data.path){const parent=data.path.includes('\\')?data.path.slice(0,data.path.lastIndexOf('\\')):'';
@@ -367,6 +367,17 @@ async function browseNas(path=''){
       else b.disabled=true;
       files.appendChild(b);
     }
+    // Pagination keeps huge Unreal Engine asset folders responsive; the
+    // package scan itself still visits every file, not just this browser page.
+    if(data.total>data.page_size){
+      const nav=document.createElement('div');nav.className='row';
+      const summary=document.createElement('span');summary.className='muted small';
+      summary.textContent=`Showing ${Math.min(data.total,data.offset+1)}–${Math.min(data.total,data.offset+data.entries.length)} of ${data.total} entries`;
+      nav.appendChild(summary);
+      if(data.offset>0){const prev=document.createElement('button');prev.type='button';prev.className='secondary';prev.textContent='Previous';prev.onclick=()=>browseNas(path,Math.max(0,data.offset-data.page_size));nav.appendChild(prev);}
+      if(data.has_more){const next=document.createElement('button');next.type='button';next.className='secondary';next.textContent='Next';next.onclick=()=>browseNas(path,data.offset+data.page_size);nav.appendChild(next);}
+      files.appendChild(nav);
+    }
   }catch(e){display.textContent='Browse failed: '+e.message;}
 }
 async function hashNasPackage(folder,entrypoint){
@@ -380,7 +391,7 @@ async function hashNasPackage(folder,entrypoint){
       await new Promise(resolve=>setTimeout(resolve,900));
       const j=await api('/api/nas/scans/'+start.job_id);
       progress.value=j.total_bytes?Math.min(100,100*j.bytes_hashed/j.total_bytes):0;
-      status.textContent=j.status==='hashing'?`Hashing ${j.current_file||'files'} — ${progress.value.toFixed(1)}%`:
+      status.textContent=j.status==='hashing'?(j.total_bytes?`Hashing ${j.current_file||'files'} — ${progress.value.toFixed(1)}%`:'Enumerating game files on NAS…'):
         j.status==='failed'?'Package scan failed: '+j.error:'';
       if(j.status==='failed')return;
       if(j.status==='ready'){

@@ -51,9 +51,9 @@ def test_unexpected_popup_error_does_not_log_acknowledgement():
 
 
 def test_release_and_existing_signed_updater_are_in_sync():
-    assert "<Version>0.6.4</Version>" in (ROOT / 'agent/HomeWatchAgent/HomeWatchAgent.csproj').read_text()
-    assert "$version = '0.6.4'" in (ROOT / '.github/workflows/release.yml').read_text()
-    assert '#define MyAppVersion "0.6.4"' in (ROOT / 'agent/installer/HomeWatchAgent.iss').read_text()
+    assert "<Version>0.6.4.1</Version>" in (ROOT / 'agent/HomeWatchAgent/HomeWatchAgent.csproj').read_text()
+    assert "$version = '0.6.4.1'" in (ROOT / '.github/workflows/release.yml').read_text()
+    assert '#define MyAppVersion "0.6.4.1"' in (ROOT / 'agent/installer/HomeWatchAgent.iss').read_text()
     workflow = (ROOT / '.github/workflows/release.yml').read_text()
     assert "@('HomeWatchAgent.exe', 'HomeWatchService.exe', 'HomeWatchUpdater.exe')" in workflow
     assert 'HomeWatchInstallerBroker-win-x64.exe' in workflow
