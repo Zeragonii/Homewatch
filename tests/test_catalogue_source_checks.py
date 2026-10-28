@@ -15,8 +15,8 @@ def test_windows_client_never_passes_a_nas_url_to_privileged_updater():
 
 
 def test_release_version_and_three_executable_update_format_unchanged():
-    assert '<Version>0.6.3.2</Version>' in (ROOT / 'agent/HomeWatchAgent/HomeWatchAgent.csproj').read_text()
+    assert '<Version>0.6.4</Version>' in (ROOT / 'agent/HomeWatchAgent/HomeWatchAgent.csproj').read_text()
     workflow = (ROOT / '.github/workflows/release.yml').read_text()
-    assert "$version = '0.6.3.2'" in workflow
+    assert "$version = '0.6.4'" in workflow
     for binary in ('HomeWatchAgent.exe','HomeWatchService.exe','HomeWatchUpdater.exe'):
         assert binary in workflow

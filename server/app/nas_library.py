@@ -39,7 +39,8 @@ def validate_relative(value: str, *, allow_empty: bool = True) -> str:
     if len(s) > MAX_RELATIVE_LEN or any(ord(c) < 32 for c in s):
         raise ValueError('Invalid relative path')
     parts = s.split('\\')
-    if any(x in ('', '.', '..') or ':' in x or x.endswith((' ', '.')) for x in parts):
+    if any(x in ('', '.', '..') or x.endswith((' ', '.')) or
+           any(c in x for c in '<>:"|?*') for x in parts):
         raise ValueError('Path traversal or invalid relative path')
     return '\\'.join(parts)
 
@@ -78,13 +79,15 @@ def list_directory(root: str, relative: str, username: str, password: str):
     return sorted(entries, key=lambda e: (not e['is_dir'], e['name'].casefold()))
 
 
-def scan_package(root: str, folder: str, entrypoint: str, username: str, password: str, on_progress=None):
+def scan_package(root: str, folder: str, entrypoint: str, username: str, password: str, on_progress=None, deployment_type='installer'):
     """Hashes every file. Progress callback(file, bytes_read, total_bytes) can update an admin job."""
     connect(root, username, password)
     folder = validate_relative(folder)
     entrypoint = validate_relative(entrypoint, allow_empty=False)
-    if '\\' in entrypoint or not entrypoint.lower().endswith('.exe'):
-        raise ValueError('Select the setup EXE in the chosen package folder')
+    if deployment_type not in ('installer', 'portable'):
+        raise ValueError('Unknown deployment type')
+    if not entrypoint.lower().endswith('.exe') or (deployment_type == 'installer' and '\\' in entrypoint):
+        raise ValueError('Choose the setup EXE for an installer or the game EXE within the portable folder')
     files = []
     paths = [('', 0)]
     total_bytes = 0
@@ -104,6 +107,8 @@ def scan_package(root: str, folder: str, entrypoint: str, username: str, passwor
                 if len(files) > MAX_FILES:
                     raise ValueError('Package exceeds 4000 file limit')
     files.sort(key=lambda f: f['path'].casefold())
+    if len({x['path'].casefold() for x in files}) != len(files):
+        raise ValueError('Game files collide on case-insensitive Windows filesystems')
     if not any(f['path'].lower() == entrypoint.lower() for f in files):
         raise ValueError('The selected setup executable is not in this folder')
     # Calculate after enumeration so progress can show a meaningful total.
@@ -129,5 +134,9 @@ def scan_package(root: str, folder: str, entrypoint: str, username: str, passwor
         if on_progress:
             on_progress(f['path'], read_bytes, total_bytes)
     manifest = {'entrypoint': entrypoint, 'files': files, 'total_bytes': total_bytes, 'file_count': count}
-    manifest['digest'] = hashlib.sha256(json.dumps({'entrypoint': entrypoint, 'files': files}, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+    fingerprint_input = {'entrypoint': entrypoint, 'files': files}
+    if deployment_type == 'portable':
+        manifest['deployment_type'] = 'portable'
+        fingerprint_input['deployment_type'] = 'portable'
+    manifest['digest'] = hashlib.sha256(json.dumps(fingerprint_input, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
     return manifest

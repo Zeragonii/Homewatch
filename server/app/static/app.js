@@ -272,12 +272,12 @@ async function loadCatalogue(force=false){
     if(!force&&(snapshot===lastCatalogueSnapshot||document.activeElement?.closest?.('#catalogueItems')))return;
     lastCatalogueSnapshot=snapshot;
     container.className='app-wrap';
-    container.innerHTML=data.items.length?`<table class="app-table catalogue-table"><thead><tr><th>App</th><th>Installer</th><th>Visible</th><th>Actions</th></tr></thead><tbody>${data.items.map(a=>`<tr>
+    container.innerHTML=data.items.length?`<table class="app-table catalogue-table"><thead><tr><th>App</th><th>Source</th><th>Visible</th><th>Actions</th></tr></thead><tbody>${data.items.map(a=>`<tr>
       <td><b>${esc(a.name)}</b><button class="subtle-action" onclick="openAppEditor('${a.installer_sha256}')">Edit tile</button><div class="meta">${esc(a.description||'Available to the household')}</div>
       <div class="meta">${a.launch_relative_path ? 'Shared launch path: <code>'+esc(a.launch_relative_path)+'</code> <button class="subtle-action" onclick="clearCatalogueLaunchHint('+a.id+')">Clear</button>' : 'No approved shared launch path yet'} <button class="subtle-action" onclick="editCatalogueLaunchPath(${a.id})">Set path</button></div></td>
-      <td class="catalogue-source"><div class="meta">${esc(a.installer_path)}</div><span class="fingerprint">SHA-256 ${esc(a.installer_sha256.substring(0,18))}…</span></td>
+      <td class="catalogue-source"><b>${a.deployment_type==='portable'?'Ready-to-play game':'Installer'}</b><div class="meta">${esc(a.installer_path)}</div><span class="fingerprint">SHA-256 ${esc(a.installer_sha256.substring(0,18))}…</span></td>
       <td>${a.enabled?'<span class="online">Published</span>':'<span class="offline">Hidden</span>'}</td>
-      <td><div class="catalogue-row-actions"><button class="secondary" onclick="setInstallerElevation(${a.id},${!a.elevate_installer})">${a.elevate_installer?'Disable broker elevation':'Allow broker elevation'}</button><button class="secondary" onclick="openCatalogueEditor(${a.id})">Edit</button>${a.enabled?`<button class="warn" onclick="unpublishCatalogueItem(${a.id})">Unpublish</button>`:''}</div></td>
+      <td><div class="catalogue-row-actions">${a.deployment_type==='portable'?'':`<button class="secondary" onclick="setInstallerElevation(${a.id},${!a.elevate_installer})">${a.elevate_installer?'Disable broker elevation':'Allow broker elevation'}</button>`}<button class="secondary" onclick="openCatalogueEditor(${a.id})">Edit</button>${a.enabled?`<button class="warn" onclick="unpublishCatalogueItem(${a.id})">Unpublish</button>`:''}</div></td>
     </tr>`).join('')}</tbody></table>`:'<div class="app-empty">Nothing published yet. Add your first NAS installer.</div>';
     const pendingHints=(data.launch_suggestions||[]).map(h=>{
       const app=data.items.find(x=>x.id===h.catalogue_id);
@@ -308,6 +308,21 @@ async function clearCatalogueLaunchHint(catalogueId){
 }
 let nasSelectedJob='';
 let nasBrowsePath='';
+let nasPortableRoot='';
+function changeCatalogueDeploymentType(){
+  const portable=document.getElementById('catalogueDeploymentType').value==='portable';
+  document.getElementById('nasBrowseHeading').textContent=portable?'Select prepared game folder and launch EXE':'Choose package folder and setup EXE';
+  document.getElementById('nasSelectRoot').classList.toggle('hidden',!portable);
+  document.getElementById('nasSelectedRoot').classList.toggle('hidden',!portable);
+  document.getElementById('nasSelectedRoot').textContent=nasPortableRoot?'Game root: '+nasPortableRoot:'Choose a game folder, click Use this folder as game root, then browse to its EXE.';
+  nasSelectedJob='';
+  document.getElementById('nasHashStatus').textContent='Browse the NAS to select an EXE for this package';
+}
+function selectPortableRoot(){
+  if(!nasBrowsePath){alert('Open the prepared game directory first, not the entire NAS share.');return;}
+  nasPortableRoot=nasBrowsePath;changeCatalogueDeploymentType();
+}
+
 async function loadNasSettings(){
   try{const n=await api('/api/nas/config');
     document.getElementById('nasShare').value=n.root_unc||'';
@@ -340,7 +355,15 @@ async function browseNas(path=''){
       const b=document.createElement('button');b.type='button';b.className='secondary nas-file';
       b.textContent=(item.is_dir?'📁 ':'📄 ')+item.name+(item.is_dir?'':' · '+(item.size/1048576).toFixed(1)+' MB');
       if(item.is_dir)b.onclick=()=>browseNas(item.path);
-      else if(item.name.toLowerCase().endsWith('.exe')) b.onclick=()=>hashNasPackage(data.path,item.name);
+      else if(item.name.toLowerCase().endsWith('.exe')) b.onclick=()=>{
+        const portable=document.getElementById('catalogueDeploymentType').value==='portable';
+        if(!portable){hashNasPackage(data.path,item.name);return;}
+        if(!nasPortableRoot){alert('Choose the prepared game folder with Use this folder as game root first.');return;}
+        const folder=nasPortableRoot.toLowerCase(), current=data.path.toLowerCase();
+        if(current!==folder&&!current.startsWith(folder+'\\')){alert('The EXE must be inside the selected game folder.');return;}
+        const relative=(data.path.length>nasPortableRoot.length?data.path.slice(nasPortableRoot.length+1)+'\\':'')+item.name;
+        hashNasPackage(nasPortableRoot,relative);
+      };
       else b.disabled=true;
       files.appendChild(b);
     }
@@ -350,7 +373,8 @@ async function hashNasPackage(folder,entrypoint){
   const status=document.getElementById('nasHashStatus'), progress=document.getElementById('nasHashProgress');
   nasSelectedJob=''; progress.classList.remove('hidden');progress.value=0;status.textContent='Scanning '+entrypoint+'…';
   try{
-    const start=await api('/api/nas/scan',{method:'POST',body:JSON.stringify({folder,entrypoint})});
+    const deployment_type=document.getElementById('catalogueDeploymentType').value;
+    const start=await api('/api/nas/scan',{method:'POST',body:JSON.stringify({folder,entrypoint,deployment_type})});
     let complete=false;
     while(!complete&&document.getElementById('catalogueEditor').open){
       await new Promise(resolve=>setTimeout(resolve,900));
@@ -370,16 +394,18 @@ async function hashNasPackage(folder,entrypoint){
   }catch(e){status.textContent=e.message}
 }
 function openCatalogueEditor(id=null){
-  editingCatalogueId=id; nasSelectedJob='';
+  editingCatalogueId=id; nasSelectedJob=''; nasPortableRoot='';
   const item=lastCatalogueData.items.find(x=>x.id===id);
   document.getElementById('catalogueEditorTitle').textContent=item?'Edit household app':'Publish to the family';
+  document.getElementById('catalogueDeploymentType').value=item?.deployment_type||'portable';
+  changeCatalogueDeploymentType();
   document.getElementById('catalogueName').value=item?.name||'';
   document.getElementById('cataloguePath').value=item?.installer_path||'';
   document.getElementById('catalogueHash').value=item?.installer_sha256||'';
   document.getElementById('catalogueDescription').value=item?.description||'';
   document.getElementById('catalogueEnabled').checked=item?.enabled??true;
   document.getElementById('catalogueFeedback').textContent='';
-  document.getElementById('nasHashStatus').textContent=item?.manifest?`${item.file_count} package files already verified`:'Select setup.exe to hash the entire folder';
+  document.getElementById('nasHashStatus').textContent=item?.manifest?`${item.file_count} package files already verified`:'Choose the game EXE or setup EXE to hash the folder';
   document.getElementById('nasHashProgress').classList.add('hidden');
   document.getElementById('nasFiles').replaceChildren();
   document.getElementById('nasBrowseLocation').textContent=item?.package_root||'Browse your configured NAS share';
@@ -393,9 +419,10 @@ async function saveCatalogueItem(event){
     const body={name:document.getElementById('catalogueName').value.trim(),
       installer_path:document.getElementById('cataloguePath').value.trim(),
       installer_sha256:document.getElementById('catalogueHash').value.trim(),
-      manifest_job_id:nasSelectedJob,description:document.getElementById('catalogueDescription').value.trim(),
+      manifest_job_id:nasSelectedJob,deployment_type:document.getElementById('catalogueDeploymentType').value,
+      description:document.getElementById('catalogueDescription').value.trim(),
       enabled:document.getElementById('catalogueEnabled').checked};
-    if(!body.manifest_job_id&&(!body.installer_path||!body.installer_sha256))throw new Error('Browse the NAS and select setup.exe first');
+    if(!body.manifest_job_id&&(!body.installer_path||!body.installer_sha256))throw new Error('Browse the NAS and select the package executable first');
     const created=await api(editingCatalogueId?`/api/catalogue/${editingCatalogueId}`:'/api/catalogue',
       {method:editingCatalogueId?'PUT':'POST',body:JSON.stringify(body)});
     const wasNew=!editingCatalogueId;

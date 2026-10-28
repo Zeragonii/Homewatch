@@ -1,3 +1,9 @@
+# HomeWatch v0.6.4 — Ready-to-play game deployment
+
+**Built on the full v0.6.3.2 release.** Parents can publish already-installed game folders from NAS and choose nested EXEs; clients copy the complete folder directly via SMB, hash while writing, resume verified files, and rename into the configured game library. Existing installer broker, automatic broker updates, wellbeing foreground reminders, game approvals and signed updater remain intact. Read [RELEASE-v0.6.4.md](RELEASE-v0.6.4.md) for deployment and security limitations.
+
+---
+
 # HomeWatch v0.6.3.2 — Wellbeing Foreground Reminder Hotfix
 
 Wellbeing prompts now use the same foreground/topmost activation and short retry sequence as the existing Alert windows. They require explicit **Done** or allowed **Snooze** interaction, reject Alt+F4 and no longer falsely log an acknowledgement if the popup fails. Automatic timers and parent history are preserved. See [RELEASE-v0.6.3.2.md](RELEASE-v0.6.3.2.md).

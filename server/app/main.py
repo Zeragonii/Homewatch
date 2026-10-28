@@ -271,6 +271,7 @@ class HouseholdCatalogueItem(Base):
     launch_relative_path: Mapped[str] = mapped_column(String(700), default="", server_default=text("''"))
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default=text("true"))
     elevate_installer: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"))
+    deployment_type: Mapped[str] = mapped_column(String(20), default="installer", server_default=text("'installer'"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
@@ -294,6 +295,7 @@ class HouseholdInstallation(Base):
     installed_path: Mapped[str] = mapped_column(Text, default="")
     executable_path: Mapped[str] = mapped_column(Text, default="")
     install_root: Mapped[str] = mapped_column(Text, default="", server_default=text("''"))
+    installed_manifest_sha256: Mapped[str] = mapped_column(String(64), default="", server_default=text("''"))
     executable_sha256: Mapped[str] = mapped_column(String(64), default="")
     request_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
@@ -384,13 +386,16 @@ with engine.begin() as conn:
                          "total_bytes": "BIGINT NOT NULL DEFAULT 0",
                          "file_count": "INTEGER NOT NULL DEFAULT 0",
                          "launch_relative_path": "VARCHAR(700) NOT NULL DEFAULT ''",
-                         "elevate_installer": "BOOLEAN NOT NULL DEFAULT false"}.items():
+                         "elevate_installer": "BOOLEAN NOT NULL DEFAULT false",
+                         "deployment_type": "VARCHAR(20) NOT NULL DEFAULT 'installer'"}.items():
             if col not in catalog_columns:
                 conn.execute(text(f"ALTER TABLE household_catalogue ADD COLUMN {col} {ddl}"))
     if inspect(conn).has_table("household_installations"):
         install_columns = {c["name"] for c in inspect(conn).get_columns("household_installations")}
         if "install_root" not in install_columns:
             conn.execute(text("ALTER TABLE household_installations ADD COLUMN install_root TEXT NOT NULL DEFAULT ''"))
+        if "installed_manifest_sha256" not in install_columns:
+            conn.execute(text("ALTER TABLE household_installations ADD COLUMN installed_manifest_sha256 VARCHAR(64) NOT NULL DEFAULT ''"))
     if inspect(conn).has_table("application_presentations"):
         conn.execute(text("UPDATE application_presentations SET artwork_revision = 0 WHERE artwork_revision IS NULL"))
 
@@ -1544,6 +1549,8 @@ def set_game_elevation(digest: str, body: ElevationSetting, db: Session = Depend
 def set_installer_elevation(catalogue_id: int, body: ElevationSetting, db: Session = Depends(db_session)):
     item = db.get(HouseholdCatalogueItem, catalogue_id)
     if item is None: raise HTTPException(404, 'Catalogue entry not found')
+    if item.deployment_type == 'portable' and body.enabled:
+        raise HTTPException(400, 'Portable games do not use the privileged installer broker')
     item.elevate_installer = body.enabled
     item.updated_at = datetime.now(timezone.utc)
     db.commit()
@@ -1569,7 +1576,7 @@ def elevation_game_authorisation(request_id: int, device: Device = Depends(agent
 @app.get('/agent/elevation/installer/{catalogue_id}')
 def elevation_installer_authorisation(catalogue_id: int, device: Device = Depends(agent_auth), db: Session = Depends(db_session)):
     item = db.get(HouseholdCatalogueItem, catalogue_id)
-    if not item or not item.enabled or not item.elevate_installer:
+    if not item or not item.enabled or item.deployment_type != 'installer' or not item.elevate_installer:
         raise HTTPException(403, 'Elevated installer use is not approved')
     if not item.manifest_json:
         raise HTTPException(403, 'Elevated installation requires a verified package manifest')
@@ -1584,7 +1591,8 @@ class CatalogueBody(BaseModel):
     name: str
     installer_path: str = ''
     installer_sha256: str = ''
-    manifest_job_id: str = '' 
+    manifest_job_id: str = ''
+    deployment_type: str = 'installer'
     description: str = ""
     enabled: bool = True
 
@@ -1636,8 +1644,10 @@ def validate_catalogue(body: CatalogueBody) -> dict:
         raise HTTPException(400, "Description is too long or invalid")
     if not re.fullmatch(r'[0-9a-f]{64}', digest):
         raise HTTPException(400, "Enter the SHA-256 fingerprint of the installer on your NAS")
+    if body.deployment_type != 'installer':
+        raise HTTPException(400, 'Portable games must be published using the verified NAS folder scanner')
     return dict(name=name, installer_path=canonical_installer_path(body.installer_path),
-                installer_sha256=digest, description=desc, enabled=body.enabled)
+                installer_sha256=digest, description=desc, enabled=body.enabled, deployment_type='installer')
 
 
 def catalogue_json(db: Session, item: HouseholdCatalogueItem, include_path: bool = True, device_id: str = '') -> dict:
@@ -1656,6 +1666,9 @@ def catalogue_json(db: Session, item: HouseholdCatalogueItem, include_path: bool
                 approved = bool(found.status != 'uninstalled' and req and request_json(req, db, db.get(Device, device_id))['status'] == 'approved')
             state = dict(status=found.status, installed_path=found.installed_path,
                          install_root=found.install_root, executable_path=found.executable_path, executable_sha256=found.executable_sha256,
+                         installed_manifest_sha256=found.installed_manifest_sha256,
+                         update_available=bool(item.deployment_type == 'portable' and found.status not in ('uninstalled', 'not_installed')
+                             and found.installed_manifest_sha256 != item.installer_sha256),
                          request_id=found.request_id, approved=approved)
     manifest = json.loads(item.manifest_json) if item.manifest_json else None
     return dict(id=item.id, name=presentation['display_name'] or item.name,
@@ -1664,6 +1677,7 @@ def catalogue_json(db: Session, item: HouseholdCatalogueItem, include_path: bool
                 package_root=item.package_root, package_entrypoint=item.package_entrypoint,
                 manifest=manifest, total_bytes=item.total_bytes, file_count=item.file_count,
                 launch_relative_path=item.launch_relative_path, elevate_installer=item.elevate_installer,
+                deployment_type=item.deployment_type,
                 installation=state, game_scan_roots=game_scan_roots,
                 enabled=item.enabled, created_at=item.created_at.isoformat(),
                 updated_at=item.updated_at.isoformat(),
@@ -1679,11 +1693,22 @@ def catalogue_input(body: CatalogueBody) -> dict:
             result = job['manifest']
             folder = job['folder']
             share = job['share']
-        # Legacy catalogue digest field is now a whole-package fingerprint.
-        canon = CatalogueBody(name=body.name, description=body.description, enabled=body.enabled,
-            installer_sha256=result['digest'],
-            installer_path=nas_library.resolve(share, folder + ('\\' if folder else '') + result['entrypoint']))
-        info = validate_catalogue(canon)
+        mode = job.get('deployment_type', 'installer')
+        if body.deployment_type != mode:
+            raise HTTPException(400, 'The selected package mode changed; scan the NAS folder again')
+        # Portable games contain no installer; the entrypoint is their main game EXE.
+        if mode == 'portable':
+            safe_root = nas_library.resolve(share, folder)
+            info = dict(name=body.name.strip(), installer_path=safe_root,
+                        installer_sha256=result['digest'], description=body.description.strip(),
+                        enabled=body.enabled, deployment_type='portable')
+            if not (1 <= len(info['name']) <= 120) or len(info['description']) > 600 or any(ord(c)<32 for c in info['name']) or any(ord(c)<32 and c not in '\n\r\t' for c in info['description']):
+                raise HTTPException(400, 'Invalid name or description')
+        else:
+            canon = CatalogueBody(name=body.name, description=body.description, enabled=body.enabled,
+                installer_sha256=result['digest'],
+                installer_path=nas_library.resolve(share, folder + ('\\' if folder else '') + result['entrypoint']))
+            info = validate_catalogue(canon)
         info.update(package_root=nas_library.resolve(share, folder),
                     package_entrypoint=result['entrypoint'],
                     manifest_json=json.dumps(result, sort_keys=True, separators=(',', ':')),
@@ -1717,6 +1742,8 @@ def admin_catalogue(db: Session = Depends(db_session)):
 def add_catalogue_item(body: CatalogueBody, db: Session = Depends(db_session)):
     info = catalogue_input(body)
     row = HouseholdCatalogueItem(**info)
+    if row.deployment_type == 'portable':
+        row.launch_relative_path = row.package_entrypoint
     db.add(row)
     # Reuse presentation and SteamGridDB artwork mechanism keyed by exact installer digest.
     existing = db.get(ApplicationPresentation, info['installer_sha256'])
@@ -1730,17 +1757,37 @@ def add_catalogue_item(body: CatalogueBody, db: Session = Depends(db_session)):
 def edit_catalogue_item(catalogue_id: int, body: CatalogueBody, db: Session = Depends(db_session)):
     row = db.get(HouseholdCatalogueItem, catalogue_id)
     if not row: raise HTTPException(404, 'Catalogue entry not found')
-    info = catalogue_input(body)
-    if not body.manifest_job_id and row.manifest_json and body.installer_path == row.installer_path and body.installer_sha256 == row.installer_sha256:
-        info.update(package_root=row.package_root, package_entrypoint=row.package_entrypoint, manifest_json=row.manifest_json, total_bytes=row.total_bytes, file_count=row.file_count)
+    if not body.manifest_job_id and row.deployment_type == 'portable' and body.deployment_type == 'portable' and body.installer_path == row.installer_path and body.installer_sha256 == row.installer_sha256:
+        info = dict(name=body.name.strip(), description=body.description.strip(), enabled=body.enabled,
+                    installer_path=row.installer_path, installer_sha256=row.installer_sha256,
+                    deployment_type='portable', package_root=row.package_root,
+                    package_entrypoint=row.package_entrypoint, manifest_json=row.manifest_json,
+                    total_bytes=row.total_bytes, file_count=row.file_count)
+        if not (1 <= len(info['name']) <= 120) or len(info['description']) > 600:
+            raise HTTPException(400, 'Invalid name or description')
+    else:
+        info = catalogue_input(body)
+    if not body.manifest_job_id and row.manifest_json and body.installer_path == row.installer_path and body.installer_sha256 == row.installer_sha256 and body.deployment_type == row.deployment_type:
+        info.update(package_root=row.package_root, package_entrypoint=row.package_entrypoint, manifest_json=row.manifest_json, total_bytes=row.total_bytes, file_count=row.file_count, deployment_type=row.deployment_type)
+    prior_presentation = db.get(ApplicationPresentation, row.installer_sha256)
     if info["installer_sha256"] != row.installer_sha256:
         row.elevate_installer = False
-        row.launch_relative_path = ""  # A changed installer needs fresh review.
+        row.launch_relative_path = info['package_entrypoint'] if info['deployment_type'] == 'portable' else ''
+    if info['deployment_type'] == 'portable':
+        row.elevate_installer = False
     for key, value in info.items(): setattr(row, key, value)
     row.updated_at = datetime.now(timezone.utc)
     presentation = db.get(ApplicationPresentation, row.installer_sha256)
     if presentation is None:
-        db.add(ApplicationPresentation(sha256=row.installer_sha256, display_name=row.name))
+        if row.deployment_type == 'portable' and prior_presentation and prior_presentation.artwork_file:
+            # Revisions retain family-approved tile art, even though each
+            # package's immutable SHA-256 fingerprint changes.
+            db.add(ApplicationPresentation(sha256=row.installer_sha256, display_name=row.name,
+                artwork_revision=prior_presentation.artwork_revision or 0,
+                artwork_file=prior_presentation.artwork_file,
+                artwork_credit=prior_presentation.artwork_credit))
+        else:
+            db.add(ApplicationPresentation(sha256=row.installer_sha256, display_name=row.name))
     else:
         presentation.display_name = row.name
     db.commit(); db.refresh(row)
@@ -1808,6 +1855,7 @@ class NasConfigBody(BaseModel):
 class NasScanBody(BaseModel):
     folder: str
     entrypoint: str
+    deployment_type: str = 'installer'
 
 
 def get_nas_settings(db: Session):
@@ -1867,7 +1915,7 @@ def browse_nas(path: str = '', db: Session = Depends(db_session)):
         raise HTTPException(502, f'Could not browse NAS share: {type(e).__name__}')
 
 
-def run_nas_scan(job_id, root, folder, entrypoint, username, pwd):
+def run_nas_scan(job_id, root, folder, entrypoint, username, pwd, deployment_type='installer'):
     def progress(filename, done, total):
         with nas_job_lock:
             job = nas_jobs[job_id]
@@ -1875,7 +1923,8 @@ def run_nas_scan(job_id, root, folder, entrypoint, username, pwd):
             job['bytes_hashed'] = done
             job['total_bytes'] = total
     try:
-        manifest = nas_library.scan_package(root, folder, entrypoint, username, pwd, progress)
+        manifest = nas_library.scan_package(root, folder, entrypoint, username, pwd, progress,
+                                            deployment_type=deployment_type)
         with nas_job_lock:
             nas_jobs[job_id].update(status='ready', manifest=manifest, bytes_hashed=manifest['total_bytes'],
                                     total_bytes=manifest['total_bytes'], current_file='')
@@ -1890,8 +1939,10 @@ def start_nas_scan(body: NasScanBody, db: Session = Depends(db_session)):
     try:
         folder = nas_library.validate_relative(body.folder)
         entrypoint = nas_library.validate_relative(body.entrypoint, allow_empty=False)
-        if '\\' in entrypoint or not entrypoint.lower().endswith('.exe'):
-            raise ValueError('Select an EXE in the package folder')
+        if body.deployment_type not in ('installer', 'portable'):
+            raise ValueError('Choose a supported deployment type')
+        if not entrypoint.lower().endswith('.exe') or (body.deployment_type == 'installer' and '\\' in entrypoint):
+            raise ValueError('Select an EXE from the package folder')
     except ValueError as e: raise HTTPException(400, str(e))
     with nas_job_lock:
         busy = sum(j['status'] == 'hashing' for j in nas_jobs.values())
@@ -1902,8 +1953,8 @@ def start_nas_scan(body: NasScanBody, db: Session = Depends(db_session)):
                 if nas_jobs[k]['status'] != 'hashing': nas_jobs.pop(k)
         job_id = uuid.uuid4().hex
         nas_jobs[job_id] = dict(status='hashing', share=root, folder=folder, entrypoint=entrypoint,
-                                bytes_hashed=0, total_bytes=0, current_file='', error='')
-    nas_pool.submit(run_nas_scan, job_id, root, folder, entrypoint, username, pwd)
+                                deployment_type=body.deployment_type, bytes_hashed=0, total_bytes=0, current_file='', error='')
+    nas_pool.submit(run_nas_scan, job_id, root, folder, entrypoint, username, pwd, body.deployment_type)
     return {'job_id': job_id}
 
 
@@ -2000,6 +2051,7 @@ class InstallationBody(BaseModel):
     executable_sha256: str = ''
     request_id: Optional[int] = None
     install_root: str = ''
+    installed_manifest_sha256: str = ''
 
 
 @app.put('/agent/catalogue/{catalogue_id}/installation')
@@ -2007,12 +2059,14 @@ def save_device_installation(catalogue_id: int, body: InstallationBody,
                              device: Device = Depends(agent_auth), db: Session = Depends(db_session)):
     item = db.get(HouseholdCatalogueItem, catalogue_id)
     if not item: raise HTTPException(404, 'Unknown package')
-    if body.status not in ('copying', 'verifying', 'installing', 'detecting', 'awaiting_approval', 'installed', 'failed', 'uninstalling', 'uninstalled', 'uninstall_failed'):
+    if body.status not in ('copying', 'verifying', 'installing', 'detecting', 'awaiting_approval', 'installed', 'failed', 'uninstalling', 'uninstalled', 'uninstall_failed', 'updating'):
         raise HTTPException(400, 'Unknown installation state')
     if (len(body.installed_path) > 2048 or len(body.executable_path) > 2048 or
         len(body.install_root) > 2048 or
         len(body.executable_sha256) not in (0, 64)):
         raise HTTPException(400, 'Invalid installed application')
+    if body.installed_manifest_sha256 and not re.fullmatch('[a-f0-9]{64}', body.installed_manifest_sha256):
+        raise HTTPException(400, 'Invalid installed manifest hash')
     if body.executable_sha256 and not re.fullmatch('[a-f0-9]{64}', body.executable_sha256):
         raise HTTPException(400, 'Invalid executable hash')
     if body.request_id:
@@ -2052,6 +2106,7 @@ def save_device_installation(catalogue_id: int, body: InstallationBody,
         return {'ok': True}
     if body.status == 'uninstalled':
         row.install_root = ''
+        row.installed_manifest_sha256 = ''
         row.installed_path = ''
         # Keep the historical executable path and request ID to prevent stale
         # standalone approval tiles reappearing after a game's files are removed.
@@ -2060,10 +2115,20 @@ def save_device_installation(catalogue_id: int, body: InstallationBody,
         return {'ok': True}
     if body.install_root:
         row.install_root = body.install_root
-    row.installed_path = body.installed_path
-    row.executable_path = body.executable_path
-    row.executable_sha256 = body.executable_sha256
-    row.request_id = body.request_id
+    if body.installed_manifest_sha256:
+        if item.deployment_type != 'portable' or body.installed_manifest_sha256 != item.installer_sha256:
+            raise HTTPException(409, 'Published portable revision has changed')
+        row.installed_manifest_sha256 = body.installed_manifest_sha256
+    # Status-only copying/updating reports must not erase the previously
+    # installed executable, its approval or revision while a transfer runs.
+    if body.installed_path:
+        row.installed_path = body.installed_path
+    if body.executable_path:
+        row.executable_path = body.executable_path
+    if body.executable_sha256:
+        row.executable_sha256 = body.executable_sha256
+    if body.request_id is not None:
+        row.request_id = body.request_id
     row.updated_at = datetime.now(timezone.utc)
     db.commit()
     return {'ok': True}

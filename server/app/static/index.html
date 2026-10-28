@@ -99,11 +99,13 @@
 </section>
 
 <dialog id="catalogueEditor" class="app-editor" aria-labelledby="catalogueEditorTitle">
-  <div class="app-editor-head"><div><h3 id="catalogueEditorTitle">Publish to the family</h3><p class="muted small">Approved installers appear in everyone's HomeWatch Launcher.</p></div><button class="secondary" onclick="document.getElementById('catalogueEditor').close()">Close</button></div>
+  <div class="app-editor-head"><div><h3 id="catalogueEditorTitle">Publish to the family</h3><p class="muted small">Publish a ready-to-play game folder or a traditional installer for every device.</p></div><button class="secondary" onclick="document.getElementById('catalogueEditor').close()">Close</button></div>
   <form id="catalogueForm" onsubmit="saveCatalogueItem(event)" class="catalogue-form">
     <label>Friendly name<input id="catalogueName" maxlength="120" required placeholder="e.g. Little Kitty, Big City"></label>
+    <label>Deployment method<select id="catalogueDeploymentType" onchange="changeCatalogueDeploymentType()"><option value="portable">Ready-to-play game folder (recommended)</option><option value="installer">Traditional installer (existing broker supported)</option></select></label>
     <div class="nas-browser">
-      <div class="row"><b>Choose package folder and setup EXE</b><button type="button" class="secondary" onclick="browseNas('')">Browse NAS</button></div>
+      <div class="row"><b id="nasBrowseHeading">Choose prepared game folder and launch EXE</b><button type="button" class="secondary" onclick="browseNas('')">Browse NAS</button><button type="button" class="secondary" id="nasSelectRoot" onclick="selectPortableRoot()">Use this folder as game root</button></div>
+      <p class="muted small" id="nasSelectedRoot">Choose the game folder itself, then browse inside it to select the game EXE.</p>
       <div class="muted small" id="nasBrowseLocation">No package selected</div>
       <div id="nasFiles" class="nas-files"></div>
       <div id="nasHashStatus" class="muted small" role="status"></div>
@@ -114,7 +116,7 @@
     <label>Existing SHA-256<input id="catalogueHash" maxlength="64" placeholder="64-character SHA-256"></label></details>
     <label>Note for children (optional)<textarea id="catalogueDescription" maxlength="600" rows="2" placeholder="Install this before trying to play."></textarea></label>
     <label class="toggle"><input type="checkbox" id="catalogueEnabled" checked> Available to every enrolled device</label>
-    <p class="muted small">HomeWatch hashes every package file before publication. Windows clients stage and verify the complete package; per-package administrator elevation is configured separately. On provisioned v0.6.2 clients, an approved installer opens elevated through the dedicated broker without another UAC prompt. Older clients may still request UAC.</p>
+    <p class="muted small">Portable games copy directly to the child's game drive and require no setup wizard. HomeWatch hashes each file, resumes verified transfers, and promotes the folder after verification. Traditional installers and approved broker elevation remain available as a fallback.</p>
     <p id="catalogueFeedback" class="error small" role="status"></p>
     <div class="row" style="justify-content:flex-end"><button type="button" class="secondary" onclick="document.getElementById('catalogueEditor').close()">Cancel</button><button id="catalogueSaveButton" type="submit">Save entry</button></div>
   </form>

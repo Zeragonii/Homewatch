@@ -33,6 +33,7 @@ public sealed class AppPortalForm : Form
     private Button? currentPrimaryButton;
     private Label? currentPrimaryStatus;
     private Button? currentUninstallButton;
+    private Button? currentUpdateButton;
     private int? currentPrimaryAppId;
     private readonly string cacheDirectory = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "HomeWatch", "artwork");
@@ -221,7 +222,9 @@ public sealed class AppPortalForm : Form
                             GameScanRoots = item.GameScanRoots,
                             InstalledRequestId = item.Installation?.Status == "uninstalled" ? 0 : item.Installation?.RequestId ?? 0,
                             InstalledApproved = item.Installation?.Status != "uninstalled" && (item.Installation?.Approved ?? false),
-                            PackageSize = item.TotalBytes
+                            PackageSize = item.TotalBytes,
+                            DeploymentType = item.DeploymentType,
+                            UpdateAvailable = item.Installation?.UpdateAvailable ?? false
                         });
                     }
                 }
@@ -354,6 +357,7 @@ public sealed class AppPortalForm : Form
         currentPrimaryButton = null;
         currentPrimaryStatus = null;
         currentUninstallButton = null;
+        currentUpdateButton = null;
         currentPrimaryAppId = null;
         detailPane.SuspendLayout();
         try
@@ -371,14 +375,14 @@ public sealed class AppPortalForm : Form
             content.RowStyles.Add(new RowStyle(SizeType.Absolute, 48));
             content.RowStyles.Add(new RowStyle(SizeType.Absolute, 72));
             content.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-            content.RowStyles.Add(new RowStyle(SizeType.Absolute, 108));
+            content.RowStyles.Add(new RowStyle(SizeType.Absolute, 145));
             content.Controls.Add(new Label { Text = "ABOUT THIS APP", ForeColor = Accent, Dock = DockStyle.Fill,
                 Font = new Font("Segoe UI Semibold", 9, FontStyle.Bold) }, 0, 0);
             content.Controls.Add(new Label { Text = app?.DisplayName ?? "Choose a game", ForeColor = TextColor,
                 Dock = DockStyle.Fill, AutoEllipsis = true,
                 Font = new Font("Segoe UI Semibold", 20, FontStyle.Bold) }, 0, 1);
             var approved = app?.Status == "approved" || app?.InstalledApproved == true;
-            var statusText = app is null ? "Select a tile to see its details" : app.IsCatalogue ? (app.PackageStatus == "uninstalled" ? "↓ Available to install" : app.InstalledApproved ? "✓ Installed — ready to play" : app.InstalledRequestId > 0 ? "◷ Installed — waiting for parent approval" : "↓ In the family library") : approved ? "✓ Approved and ready" :
+            var statusText = app is null ? "Select a tile to see its details" : app.IsCatalogue ? (app.PackageStatus == "uninstalled" ? "↓ Available to install" : app.InstalledApproved && app.UpdateAvailable ? "↻ Update available — game still playable" : app.InstalledApproved ? "✓ Installed — ready to play" : app.InstalledRequestId > 0 ? "◷ Installed — waiting for parent approval" : "↓ In the family library") : approved ? "✓ Approved and ready" :
                 app.Status == "pending" ? "◷ Waiting for parent approval" : "Not approved";
             var statusLabel = new Label { Text = statusText, ForeColor = approved ? Green : Amber, Dock = DockStyle.Fill,
                 Font = new Font("Segoe UI Semibold", 10, FontStyle.Bold) };
@@ -386,7 +390,7 @@ public sealed class AppPortalForm : Form
             content.Controls.Add(new Label { Text = app is not null && !string.IsNullOrWhiteSpace(app.Publisher) ? $"Publisher: {app.Publisher}" : "Publisher unavailable",
                 ForeColor = Muted, AutoEllipsis = true, Dock = DockStyle.Fill }, 0, 3);
             content.Controls.Add(new Label { Text = app is null ? "A nice place to keep your favourite games!" :
-                app.IsCatalogue ? $"{app.Description}\n\nInstaller: {app.FileName}\nSize: {app.PackageSize / (1024.0 * 1024 * 1024):F2} GB\n" +
+                app.IsCatalogue ? $"{app.Description}\n\n{(app.DeploymentType == "portable" ? "Ready-to-play game folder" : "Installer: " + app.FileName)}\nSize: {app.PackageSize / (1024.0 * 1024 * 1024):F2} GB\n" +
                 (string.IsNullOrEmpty(app.InstalledPath) || app.PackageStatus == "uninstalled" ? "Available to everyone in your family." : $"Installed here: {app.InstalledPath}") :
                 $"File: {app.FileName}\n{app.FilePath}\n\nOnly applications approved by your parent can be opened here.",
                 ForeColor = Muted, Dock = DockStyle.Fill, AutoEllipsis = true }, 0, 4);
@@ -401,10 +405,20 @@ public sealed class AppPortalForm : Form
                 currentPrimaryStatus = statusLabel;
                 currentPrimaryAppId = app.Id;
             }
-            var actionPanel = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2 };
+            var actionPanel = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3 };
             actionPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 55));
             actionPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
+            actionPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
             actionPanel.Controls.Add(button, 0, 0);
+            if (app?.IsCatalogue == true && app.DeploymentType == "portable" && app.UpdateAvailable &&
+                !string.IsNullOrWhiteSpace(app.InstalledPath))
+            {
+                var update = ButtonFor("↓  UPDATE GAME", Color.FromArgb(48, 103, 132), 100, 36);
+                update.Dock = DockStyle.Fill;
+                update.Click += async (_, _) => await InstallCatalogueAsync(app, update);
+                currentUpdateButton = update;
+                actionPanel.Controls.Add(update, 0, 1);
+            }
             if (app?.IsCatalogue == true && !string.IsNullOrEmpty(app.InstalledPath) &&
                 app.PackageStatus is not ("uninstalled" or "uninstalling"))
             {
@@ -412,7 +426,7 @@ public sealed class AppPortalForm : Form
                 remove.Dock = DockStyle.Fill;
                 remove.Click += async (_, _) => await UninstallCatalogueAsync(app, remove);
                 currentUninstallButton = remove;
-                actionPanel.Controls.Add(remove, 0, 1);
+                actionPanel.Controls.Add(remove, 0, 2);
             }
             content.Controls.Add(actionPanel, 0, 5);
             detailPane.Controls.Add(content);
@@ -500,6 +514,8 @@ public sealed class AppPortalForm : Form
                 Color.FromArgb(154, 66, 76) : state == GameProcessTracker.GameState.Ready ? Accent : Surface;
             if (currentUninstallButton is not null && !currentUninstallButton.IsDisposed)
                 currentUninstallButton.Enabled = state == GameProcessTracker.GameState.Ready && !installing;
+            if (currentUpdateButton is not null && !currentUpdateButton.IsDisposed)
+                currentUpdateButton.Enabled = state == GameProcessTracker.GameState.Ready && !installing;
             if (currentPrimaryStatus is not null && !currentPrimaryStatus.IsDisposed)
             {
                 currentPrimaryStatus.Text = state switch
@@ -584,11 +600,12 @@ public sealed class AppPortalForm : Form
     }
 
     private async Task InstallationStateAsync(int id, string status, string installed = "", string executable = "",
-        string digest = "", int? requestId = null, string installRoot = "")
+        string digest = "", int? requestId = null, string installRoot = "", string installedRevision = "")
     {
         using var response = await http.PutAsJsonAsync($"agent/catalogue/{id}/installation",
             new { status, installed_path = installed, executable_path = executable,
-                executable_sha256 = digest, request_id = requestId, install_root = installRoot });
+                executable_sha256 = digest, request_id = requestId, install_root = installRoot,
+                installed_manifest_sha256 = installedRevision });
         await RequireSuccess(response);
     }
 
@@ -644,7 +661,8 @@ public sealed class AppPortalForm : Form
     }
 
     private async Task RegisterInstalledGameAsync(PortalCatalogueItem item, string selected,
-        HashSet<string>? registryBefore = null)
+        HashSet<string>? registryBefore = null, string? explicitRoot = null,
+        string installedRevision = "")
     {
         // An existing game EXE must not point into HomeWatch's own installer cache.
         var stageRoot = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
@@ -660,11 +678,11 @@ public sealed class AppPortalForm : Form
         var requestId = doc.RootElement.GetProperty("id").GetInt32();
         // Suggest a reusable relative path only when we know the game root.
         // The parent approves it separately on the web dashboard.
-        var root = HouseholdPackageInstaller.InferInstallRoot(selected,
+        var root = explicitRoot ?? HouseholdPackageInstaller.InferInstallRoot(selected,
             registryBefore ?? new HashSet<string>(StringComparer.OrdinalIgnoreCase),
             item.Name, item.GameScanRoots);
         await InstallationStateAsync(item.Id, "awaiting_approval", Path.GetDirectoryName(selected) ?? "",
-            selected, candidate.Sha256, requestId, root ?? "");
+            selected, candidate.Sha256, requestId, root ?? "", installedRevision);
     }
 
     private async Task UninstallCatalogueAsync(PortalApplication app, Button button)
@@ -702,7 +720,7 @@ public sealed class AppPortalForm : Form
                 !string.Equals(current.Installation.ExecutablePath, exe, StringComparison.OrdinalIgnoreCase))
                 throw new IOException("Installation changed; refresh the family library.");
             var root = current.Installation.InstallRoot;
-            var registered = HouseholdGameUninstaller.FindRegistered(exe, root);
+            var registered = current.DeploymentType == "portable" ? null : HouseholdGameUninstaller.FindRegistered(exe, root);
             if (registered is not null)
             {
                 if (MessageBox.Show(this,
@@ -772,6 +790,96 @@ public sealed class AppPortalForm : Form
         }
     }
 
+    private async Task InstallPortableAsync(PortalCatalogueItem item, PortalApplication app, Button button)
+    {
+        if (item.Manifest == null) { footer.Text = "The portable game has no approved manifest."; return; }
+        if (!string.IsNullOrWhiteSpace(app.InstalledPath) &&
+            StateFor(app) != GameProcessTracker.GameState.Ready)
+        {
+            footer.Text = "Close the game before updating its files.";
+            return;
+        }
+        bool isUpdate = app.UpdateAvailable;
+        if (MessageBox.Show(this,
+            $"{(isUpdate ? "Update" : "Install")} {app.DisplayName}?\n\n" +
+            $"Download size: {item.TotalBytes / (1024.0 * 1024 * 1024):F2} GB\n" +
+            "HomeWatch will copy files directly from your family's NAS and check every SHA-256 fingerprint. " +
+            "No installer or administrator password is needed." +
+            (isUpdate ? "\n\nYour old game folder will be backed up in case it contains saves." : ""),
+            "Ready-to-play game", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
+        installing = true;
+        button.Enabled = false;
+        string auditStatus = "failed", auditDetail = "";
+        using var cancel = new CancellationTokenSource();
+        using var window = new Form { Text = "Copying " + app.DisplayName, Size = new Size(550, 160),
+            StartPosition = FormStartPosition.CenterParent, FormBorderStyle = FormBorderStyle.FixedDialog,
+            MaximizeBox = false, MinimizeBox = false, ControlBox = false };
+        var progressText = new Label { Dock = DockStyle.Top, Height = 52, Padding = new Padding(12),
+            Text = "Preparing the destination game folder…", AutoEllipsis = true };
+        var cancelButton = new Button { Dock = DockStyle.Bottom, Height = 36, Text = "Cancel copying" };
+        cancelButton.Click += (_, _) => { cancel.Cancel(); cancelButton.Enabled = false; };
+        window.Controls.Add(progressText);
+        window.Controls.Add(cancelButton);
+        window.Show(this);
+        try
+        {
+            // A published revision must be revalidated before and after transfer.
+            await InstallationStateAsync(item.Id, isUpdate ? "updating" : "copying");
+            var exe = await PortableGameDeployment.DeployAsync(item, status =>
+            {
+                if (!window.IsDisposed) progressText.Text = status;
+                if (!IsDisposed) footer.Text = status;
+            }, cancel.Token);
+            using (var published = await http.GetAsync($"agent/catalogue/{item.Id}"))
+            {
+                await RequireSuccess(published);
+                var fresh = await published.Content.ReadFromJsonAsync<PortalCatalogueItem>();
+                if (fresh == null || !fresh.Enabled || fresh.DeploymentType != "portable" ||
+                    fresh.InstallerSha256 != item.InstallerSha256)
+                    throw new IOException("The game's published revision changed during copying. Refresh before playing.");
+            }
+            window.Hide();
+            if (!File.Exists(exe)) throw new IOException("Verified game executable is missing");
+            var root = Path.GetFullPath(exe);
+            foreach (var segment in item.Manifest.Entrypoint.Split('\\'))
+                root = Path.GetDirectoryName(root) ?? throw new IOException("Invalid published game path");
+            // Existing request/approval machinery still applies: a copied game
+            // is not authorised to run merely because it was published.
+            await RegisterInstalledGameAsync(item, exe, explicitRoot: root,
+                installedRevision: item.InstallerSha256);
+            auditStatus = "started";
+            auditDetail = (isUpdate ? "Portable game updated" : "Portable game deployed") +
+                "; launch executable submitted for existing parent approval";
+            footer.Text = isUpdate ? "Game updated; waiting for launch approval if its EXE changed." :
+                "Game copied successfully! Parent launch approval is next.";
+        }
+        catch (OperationCanceledException)
+        {
+            footer.Text = "Game copy cancelled. Verified files will resume next time.";
+            auditDetail = "Portable copy cancelled; verified staging retained";
+            try { await InstallationStateAsync(item.Id, "failed"); } catch { }
+        }
+        catch (Exception ex)
+        {
+            footer.Text = "Could not deploy game: " + ex.Message;
+            auditDetail = ex.Message;
+            try { await InstallationStateAsync(item.Id, "failed"); } catch { }
+        }
+        finally
+        {
+            try
+            {
+                using var audit = await http.PostAsJsonAsync($"agent/catalogue/{item.Id}/attempts",
+                    new { status = auditStatus, detail = auditDetail.Length > 280 ? auditDetail[..280] : auditDetail });
+                await RequireSuccess(audit);
+            }
+            catch { }
+            window.Hide();
+            installing = false;
+            if (!IsDisposed) { button.Enabled = true; await LoadAppsAsync(force: true); }
+        }
+    }
+
     private async Task InstallCatalogueAsync(PortalApplication app, Button button)
     {
         // Retain v0.4.5 support for a package with only an EXE fingerprint.
@@ -784,6 +892,11 @@ public sealed class AppPortalForm : Form
                 ?? throw new IOException("Package no longer exists");
         }
         catch (Exception e) { footer.Text = "Unable to open the installer: " + e.Message; return; }
+        if (item.DeploymentType == "portable")
+        {
+            await InstallPortableAsync(item, app, button);
+            return;
+        }
         if (item.Manifest == null)
         {
             if (item.ElevateInstaller)
@@ -1295,6 +1408,7 @@ public sealed class PortalCatalogueItem
     [JsonPropertyName("description")] public string Description { get; set; } = "";
     [JsonPropertyName("enabled")] public bool Enabled { get; set; }
     [JsonPropertyName("elevate_installer")] public bool ElevateInstaller { get; set; }
+    [JsonPropertyName("deployment_type")] public string DeploymentType { get; set; } = "installer";
     [JsonPropertyName("artwork_revision")] public int ArtworkRevision { get; set; }
     [JsonPropertyName("package_root")] public string PackageRoot { get; set; } = "";
     [JsonPropertyName("package_entrypoint")] public string PackageEntrypoint { get; set; } = "";
@@ -1312,6 +1426,8 @@ public sealed class PackageInstallation
     [JsonPropertyName("install_root")] public string InstallRoot { get; set; } = "";
     [JsonPropertyName("request_id")] public int? RequestId { get; set; }
     [JsonPropertyName("approved")] public bool Approved { get; set; }
+    [JsonPropertyName("update_available")] public bool UpdateAvailable { get; set; }
+    [JsonPropertyName("installed_manifest_sha256")] public string InstalledManifestSha256 { get; set; } = "";
 }
 
 public sealed class PackageManifest
@@ -1333,6 +1449,8 @@ public sealed class PortalApplication
     [JsonPropertyName("id")] public int Id { get; set; }
     public int CatalogueId { get; set; }
     public bool IsCatalogue { get; set; }
+    public string DeploymentType { get; set; } = "installer";
+    public bool UpdateAvailable { get; set; }
     public string Description { get; set; } = "";
     public string PackageStatus { get; set; } = "";
     public string InstalledPath { get; set; } = "";
