@@ -852,7 +852,7 @@ public sealed class AppPortalForm : Form
             if (item.ElevateInstaller)
             {
                 if (!InstallerBrokerClient.IsInstalled)
-                    throw new IOException("The signed v0.6.2 installer broker is not installed. Run the v0.6.2 Windows installer as administrator once.");
+                    throw new IOException("The installer broker service is not installed. Run a signed HomeWatch installer once as administrator to register it; later releases update automatically.");
                 // Never execute the child-writable cache with elevated privileges.
                 // The service independently fetches permission, verifies the
                 // complete package, and runs from a protected Program Files copy.

@@ -26,6 +26,13 @@ internal static class SignaturePolicy
             VerifyFile(Path.Combine(folder, name), pin);
     }
 
+    internal static void VerifyBroker(string brokerFile)
+    {
+        if (!string.Equals(Path.GetFileName(brokerFile), Settings.BrokerBinary, StringComparison.Ordinal))
+            throw new InvalidDataException("Unexpected broker update executable name");
+        VerifyFile(brokerFile, GetPinnedPublisher());
+    }
+
     private static void VerifyFile(string file, string expectedSha256)
     {
         if (!File.Exists(file)) throw new FileNotFoundException("Missing signed update executable", file);

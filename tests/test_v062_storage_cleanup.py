@@ -13,7 +13,7 @@ def test_launcher_has_visible_child_facing_storage_action():
     assert 'new StorageCleanupForm(() => installing)' in UI
     assert 'storageTimer' in UI and 'RefreshStorageBadgeAsync' in UI
     assert 'Performance settings' in UI
-    assert 'Run the v0.6.2 Windows installer' in UI
+    assert 'Run a signed HomeWatch installer once as administrator' in UI
 
 
 def test_cleanup_form_displays_both_caches_and_eligible_bytes():

@@ -16,7 +16,7 @@ def test_independent_broker_is_built_and_signed():
 
 def test_three_binary_updater_still_unchanged():
     assert "@('HomeWatchAgent.exe', 'HomeWatchService.exe', 'HomeWatchUpdater.exe')" in WORKFLOW
-    assert 'HomeWatchInstallerBroker.exe' not in (ROOT/'agent/HomeWatchService/Program.cs').read_text()
+    assert 'public static readonly string[] Allowed = { "HomeWatchAgent.exe", "HomeWatchUpdater.exe", "HomeWatchService.exe" };' in (ROOT/'agent/HomeWatchService/Program.cs').read_text()
 
 
 def test_narrow_pipe_input_and_server_authorisation():
