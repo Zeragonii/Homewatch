@@ -1,4 +1,4 @@
-"""Portable game deployment v0.6.4.1; baseline is recovered 0.6.3.2."""
+"""Portable game deployment v0.6.5; baseline is recovered 0.6.3.2."""
 import hashlib
 import io
 import os
@@ -29,7 +29,7 @@ def make_device():
         child = Child(name='Portable child '+uuid.uuid4().hex[:7]); db.add(child); db.flush()
         db.add(Device(id=did, child_id=child.id, name='Portable test PC',
                       installation_id=str(uuid.uuid4()), token_hash=sha256_text(token),
-                      hostname='TEST', os_version='Windows', agent_version='0.6.4.1'))
+                      hostname='TEST', os_version='Windows', agent_version='0.6.5'))
         db.commit()
     return {'X-Device-ID':did, 'Authorization':'Bearer '+token}
 
@@ -164,6 +164,6 @@ def test_portable_client_and_signed_release_contract():
     assert 'MatchesManifestAsync' in copy
     assert 'UpdateAvailable' in agent
     workflow=(ROOT/'.github/workflows/release.yml').read_text()
-    assert "$version = '0.6.4.1'" in workflow
+    assert "$version = '0.6.5'" in workflow
     assert "@('HomeWatchAgent.exe', 'HomeWatchService.exe', 'HomeWatchUpdater.exe')" in workflow
     assert 'HomeWatchInstallerBroker-win-x64.exe' in workflow

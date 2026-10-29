@@ -69,9 +69,9 @@ def test_broker_cleans_up_when_launch_fails():
 
 
 def test_patch_version_and_compatibility():
-    assert '<Version>0.6.4.1</Version>' in (ROOT / 'agent/HomeWatchAgent/HomeWatchAgent.csproj').read_text()
-    assert '<Version>0.6.4.1</Version>' in (ROOT / 'agent/HomeWatchInstallerBroker/HomeWatchInstallerBroker.csproj').read_text()
-    assert "$version = '0.6.4.1'" in (ROOT / '.github/workflows/release.yml').read_text()
-    assert '#define MyAppVersion "0.6.4.1"' in (ROOT / 'agent/installer/HomeWatchAgent.iss').read_text()
+    assert '<Version>0.6.5</Version>' in (ROOT / 'agent/HomeWatchAgent/HomeWatchAgent.csproj').read_text()
+    assert '<Version>0.6.5</Version>' in (ROOT / 'agent/HomeWatchInstallerBroker/HomeWatchInstallerBroker.csproj').read_text()
+    assert "$version = '0.6.5'" in (ROOT / '.github/workflows/release.yml').read_text()
+    assert '#define MyAppVersion "0.6.5"' in (ROOT / 'agent/installer/HomeWatchAgent.iss').read_text()
     assert 'HomeWatchInstallerBroker-v0.6.0' in (ROOT / 'agent/HomeWatchInstallerBroker/RunnerIdentity.cs').read_text() # DPAPI entropy fixed across updates
     assert "@('HomeWatchAgent.exe', 'HomeWatchService.exe', 'HomeWatchUpdater.exe')" in (ROOT / '.github/workflows/release.yml').read_text()

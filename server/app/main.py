@@ -1921,11 +1921,18 @@ def run_nas_scan(job_id, root, folder, entrypoint, username, pwd, deployment_typ
         with nas_job_lock:
             job = nas_jobs[job_id]
             job['current_file'] = filename
+            job['phase'] = 'packaging' if filename.startswith('Packaging ') else 'hashing'
             job['bytes_hashed'] = done
             job['total_bytes'] = total
     try:
         manifest = nas_library.scan_package(root, folder, entrypoint, username, pwd, progress,
                                             deployment_type=deployment_type)
+        if deployment_type == 'portable':
+            # Package once on the NAS. No HTTP file relay and no disk copy on
+            # the Windows client: it streams ZIP entries straight from SMB.
+            transport = nas_library.build_portable_chunks(
+                root, folder, username, pwd, manifest, progress)
+            manifest.update(transport)
         with nas_job_lock:
             nas_jobs[job_id].update(status='ready', manifest=manifest, bytes_hashed=manifest['total_bytes'],
                                     total_bytes=manifest['total_bytes'], current_file='')
@@ -1954,7 +1961,7 @@ def start_nas_scan(body: NasScanBody, db: Session = Depends(db_session)):
                 if nas_jobs[k]['status'] != 'hashing': nas_jobs.pop(k)
         job_id = uuid.uuid4().hex
         nas_jobs[job_id] = dict(status='hashing', share=root, folder=folder, entrypoint=entrypoint,
-                                deployment_type=body.deployment_type, bytes_hashed=0, total_bytes=0, current_file='', error='')
+                                deployment_type=body.deployment_type, phase='enumerating', bytes_hashed=0, total_bytes=0, current_file='', error='')
     nas_pool.submit(run_nas_scan, job_id, root, folder, entrypoint, username, pwd, body.deployment_type)
     return {'job_id': job_id}
 

@@ -1,4 +1,11 @@
-# HomeWatch v0.6.4.1 — Large portable library scan fix
+# HomeWatch v0.6.5 — Fast ZIP-chunk portable game deployment
+
+## v0.6.5 — uncompressed ZIP chunks for portable games
+
+Publishing a ready-to-play game now creates **~1 GiB uncompressed ZIP parts** in the configured NAS share's `.homewatch-packages/<digest>` cache. Child clients read the ZIPs directly over SMB and extract into final-drive staging **without downloading the ZIPs to the SSD**. This dramatically reduces one-file-per-request SMB overhead for large games with thousands of small files.
+
+**Important:** the NAS credentials saved in the HomeWatch Web UI must be able to *write* `.homewatch-packages` at the share root. The child's Windows account requires read access. This adds approximately one complete game-sized distribution copy to NAS storage. Rescan and republish legacy portable entries to generate ZIP chunks. The client checks the published EXE SHA-256; it does not rehash every asset during extraction. Previous installer and broker features are retained; updates remain full redownloads. See `RELEASE-v0.6.5.md`.
+
 
 **Built on the full v0.6.3.2 release.** Parents can publish already-installed game folders from NAS and choose nested EXEs; clients copy the complete folder directly via SMB, hash while writing, resume verified files, and rename into the configured game library. Existing installer broker, automatic broker updates, wellbeing foreground reminders, game approvals and signed updater remain intact. Read [RELEASE-v0.6.4.md](RELEASE-v0.6.4.md) for deployment and security limitations.
 

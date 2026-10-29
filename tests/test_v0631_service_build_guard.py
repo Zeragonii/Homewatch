@@ -20,4 +20,4 @@ def test_sc_process_start_checks_null_explicitly():
 def test_bridge_stays_three_executables():
     assert "@('HomeWatchAgent.exe', 'HomeWatchService.exe', 'HomeWatchUpdater.exe')" in WORKFLOW
     assert 'HomeWatchInstallerBroker-win-x64.exe' in WORKFLOW
-    assert "$version = '0.6.4.1'" in WORKFLOW
+    assert "$version = '0.6.5'" in WORKFLOW

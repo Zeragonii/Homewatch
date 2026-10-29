@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.IO.Compression;
 using System.Security.Cryptography;
 using System.Text.RegularExpressions;
 
@@ -59,6 +60,13 @@ internal static class PortableGameDeployment
             return Path.Combine(final, entrypoint);
         }
 
+        if (manifest.Transport == "zip-chunks-v1")
+        {
+            await DeployChunksAsync(item, manifest, stage, entrypoint, progress, token);
+        }
+        else if (string.IsNullOrEmpty(manifest.Transport))
+        {
+        // Compatibility: legacy portable packages published before v0.6.5.
         long done = 0;
         foreach (var f in manifest.Files)
         {
@@ -123,11 +131,22 @@ internal static class PortableGameDeployment
             }
             finally { try { if (File.Exists(part)) File.Delete(part); } catch { } }
         }
+        }
+        else throw new IOException("Unsupported portable game distribution format");
         token.ThrowIfCancellationRequested();
         // Never promote unexpected content, partial downloads or directory links.
         AssertExactContents(stage, manifest);
         var exe = Path.Combine(stage, entrypoint);
-        if (!File.Exists(exe)) throw new IOException("Approved game EXE was not copied");
+        if (!File.Exists(exe) || !await MatchesAsync(exe,
+                manifest.Files.First(f => f.Path.Equals(entrypoint, StringComparison.OrdinalIgnoreCase)).Sha256, token))
+            throw new IOException("The approved game executable hash does not match");
+        // Check size and file count without a second full read of all game assets.
+        foreach (var f in manifest.Files)
+        {
+            var path = Path.Combine(stage, HouseholdPackageInstaller.SafeRelative(f.Path));
+            if (!File.Exists(path) || new FileInfo(path).Length != f.Size)
+                throw new IOException("Game staging is incomplete: " + f.Path);
+        }
 
         // Replacing a game keeps the previous COMPLETE directory as a separate
         // rollback backup. We never overwrite saves/mods in place.
@@ -157,6 +176,135 @@ internal static class PortableGameDeployment
         }
         progress("Verified game promoted into the library. Ready for launch approval.");
         return Path.Combine(final, entrypoint);
+    }
+
+    private static async Task DeployChunksAsync(PortalCatalogueItem item, PackageManifest manifest,
+        string stage, string entrypoint, Action<string> progress, CancellationToken token)
+    {
+        if (manifest.Chunks.Count is < 1 or > 1024)
+            throw new IOException("Invalid published ZIP chunk count");
+        // Do not accept arbitrary network archive roots supplied by a client:
+        // the server must publish packages under this share's fixed cache path.
+        var uncParts = item.PackageRoot.TrimStart('\\').Split('\\', StringSplitOptions.RemoveEmptyEntries);
+        if (uncParts.Length < 2)
+            throw new IOException("Invalid game source share");
+        var expectedArchiveRoot = @"\\" + uncParts[0] + "\\" + uncParts[1] +
+            @"\.homewatch-packages\" + item.InstallerSha256;
+        if (!manifest.ArchiveRoot.Equals(expectedArchiveRoot, StringComparison.OrdinalIgnoreCase))
+            throw new IOException("ZIP archive root does not match the published NAS share and digest");
+
+        int nextFile = 0;
+        long expectedTotal = 0;
+        var started = Stopwatch.StartNew();
+        long completedBytes = 0;
+        foreach (var chunk in manifest.Chunks)
+        {
+            token.ThrowIfCancellationRequested();
+            if (!Regex.IsMatch(chunk.Name, @"^part-[0-9]{4}\.zip$", RegexOptions.IgnoreCase) ||
+                chunk.FileStart != nextFile || chunk.FileCount < 1 ||
+                nextFile + chunk.FileCount > manifest.Files.Count || chunk.UncompressedBytes < 0)
+                throw new IOException("Invalid portable ZIP chunk manifest");
+            var files = manifest.Files.GetRange(nextFile, chunk.FileCount);
+            var declared = files.Sum(f => f.Size);
+            if (declared != chunk.UncompressedBytes)
+                throw new IOException("ZIP chunk manifest byte count mismatch");
+            expectedTotal = checked(expectedTotal + declared);
+            nextFile += chunk.FileCount;
+
+            bool present = true;
+            foreach (var file in files)
+            {
+                var target = Path.Combine(stage, HouseholdPackageInstaller.SafeRelative(file.Path));
+                EnsureSafePath(stage, Path.GetDirectoryName(target)!);
+                if (!File.Exists(target) || new FileInfo(target).Length != file.Size ||
+                    File.Exists(target + ".download") ||
+                    (file.Path.Equals(entrypoint, StringComparison.OrdinalIgnoreCase) &&
+                     !await MatchesAsync(target, file.Sha256, token)))
+                {
+                    present = false;
+                    break;
+                }
+            }
+            if (present)
+            {
+                completedBytes += declared;
+                progress($"Resumed {completedBytes * 100.0 / Math.Max(1, manifest.TotalBytes):F1}% from completed ZIP chunks");
+                continue;
+            }
+            string source = manifest.ArchiveRoot + "\\" + chunk.Name;
+            await using var remote = new FileStream(source, FileMode.Open, FileAccess.Read,
+                FileShare.Read, 1024 * 1024, FileOptions.Asynchronous | FileOptions.RandomAccess);
+            using var archive = new ZipArchive(remote, ZipArchiveMode.Read, leaveOpen: true);
+            if (archive.Entries.Count != files.Count)
+                throw new IOException("ZIP chunk has missing or additional files: " + chunk.Name);
+            long chunkCopied = 0;
+            for (int i = 0; i < files.Count; i++)
+            {
+                token.ThrowIfCancellationRequested();
+                var file = files[i];
+                var relative = HouseholdPackageInstaller.SafeRelative(file.Path);
+                var entry = archive.Entries[i];
+                if (!entry.FullName.Replace('/', '\\').Equals(relative, StringComparison.OrdinalIgnoreCase) ||
+                    entry.Length != file.Size || entry.CompressedLength != entry.Length)
+                    throw new IOException("ZIP entry does not match the published uncompressed manifest: " + file.Path);
+                var target = Path.GetFullPath(Path.Combine(stage, relative));
+                AssertInside(stage, target);
+                var parent = Path.GetDirectoryName(target)!;
+                EnsureSafePath(stage, parent);
+                Directory.CreateDirectory(parent);
+                EnsureSafePath(stage, parent);
+                EnsureSafePath(stage, target);
+                var part = target + ".download";
+                EnsureSafePath(stage, part);
+                try
+                {
+                    bool isExecutable = relative.Equals(entrypoint, StringComparison.OrdinalIgnoreCase);
+                    using var exeHash = isExecutable ? IncrementalHash.CreateHash(HashAlgorithmName.SHA256) : null;
+                    long copied = 0;
+                    await using (var input = entry.Open())
+                    await using (var output = new FileStream(part, FileMode.Create, FileAccess.Write,
+                        FileShare.None, 1024 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan))
+                    {
+                        // Stream from the SMB ZIP directly into final-drive staging:
+                        // one SSD write and no local copy of the ZIP.
+                        var buffer = new byte[1024 * 1024];
+                        int read;
+                        long lastReport = 0;
+                        while ((read = await input.ReadAsync(buffer, token)) != 0)
+                        {
+                            copied += read;
+                            if (copied > file.Size) throw new IOException("Oversized ZIP entry: " + relative);
+                            exeHash?.AppendData(buffer, 0, read);
+                            await output.WriteAsync(buffer.AsMemory(0, read), token);
+                            if (started.ElapsedMilliseconds - lastReport > 600)
+                            {
+                                var current = completedBytes + chunkCopied + copied;
+                                var mbps = current / 1048576.0 / Math.Max(0.001, started.Elapsed.TotalSeconds);
+                                progress($"Extracting ZIP chunks — {current * 100.0 / Math.Max(1, manifest.TotalBytes):F1}% ({mbps:F1} MiB/s)");
+                                lastReport = started.ElapsedMilliseconds;
+                            }
+                        }
+                        await output.FlushAsync(token);
+                    }
+                    if (copied != file.Size)
+                        throw new IOException("Incomplete ZIP entry: " + relative);
+                    if (isExecutable &&
+                        !Convert.ToHexString(exeHash!.GetHashAndReset()).Equals(file.Sha256,
+                            StringComparison.OrdinalIgnoreCase))
+                        throw new IOException("Executable SHA-256 mismatch in ZIP: " + relative);
+                    chunkCopied += copied;
+                    File.Move(part, target, true);
+                }
+                finally { try { if (File.Exists(part)) File.Delete(part); } catch { } }
+            }
+            completedBytes += declared;
+            var seconds = Math.Max(0.001, started.Elapsed.TotalSeconds);
+            progress($"ZIP chunk {manifest.Chunks.IndexOf(chunk) + 1}/{manifest.Chunks.Count} — " +
+                $"{completedBytes * 100.0 / Math.Max(1, manifest.TotalBytes):F1}% " +
+                $"({completedBytes / 1048576.0 / seconds:F1} MiB/s)");
+        }
+        if (nextFile != manifest.Files.Count || expectedTotal != manifest.TotalBytes)
+            throw new IOException("Incomplete ZIP manifest");
     }
 
     private static (string library, string final) ChooseDestination(PortalCatalogueItem item)
@@ -283,7 +431,10 @@ internal static class PortableGameDeployment
             {
                 var target = Path.Combine(root, HouseholdPackageInstaller.SafeRelative(f.Path));
                 if (!File.Exists(target) || new FileInfo(target).Length != f.Size ||
-                    !await MatchesAsync(target, f.Sha256, token)) return false;
+                    (f.Path.Equals(manifest.Entrypoint, StringComparison.OrdinalIgnoreCase) &&
+                     !await MatchesAsync(target, f.Sha256, token)) ||
+                    (manifest.Transport != "zip-chunks-v1" &&
+                     !await MatchesAsync(target, f.Sha256, token))) return false;
             }
             return true;
         }

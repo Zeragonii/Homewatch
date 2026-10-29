@@ -391,7 +391,7 @@ async function hashNasPackage(folder,entrypoint){
       await new Promise(resolve=>setTimeout(resolve,900));
       const j=await api('/api/nas/scans/'+start.job_id);
       progress.value=j.total_bytes?Math.min(100,100*j.bytes_hashed/j.total_bytes):0;
-      status.textContent=j.status==='hashing'?(j.total_bytes?`Hashing ${j.current_file||'files'} — ${progress.value.toFixed(1)}%`:'Enumerating game files on NAS…'):
+      status.textContent=j.status==='hashing'?(j.phase==='packaging'?`Building uncompressed ZIP chunks — ${progress.value.toFixed(1)}%`:j.total_bytes?`Hashing ${j.current_file||'files'} — ${progress.value.toFixed(1)}%`:'Enumerating game files on NAS…'):
         j.status==='failed'?'Package scan failed: '+j.error:'';
       if(j.status==='failed')return;
       if(j.status==='ready'){

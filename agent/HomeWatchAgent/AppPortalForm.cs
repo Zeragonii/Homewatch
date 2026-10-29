@@ -1435,6 +1435,17 @@ public sealed class PackageManifest
     [JsonPropertyName("entrypoint")] public string Entrypoint { get; set; } = "";
     [JsonPropertyName("total_bytes")] public long TotalBytes { get; set; }
     [JsonPropertyName("files")] public List<PackageFile> Files { get; set; } = new();
+    [JsonPropertyName("transport")] public string Transport { get; set; } = "";
+    [JsonPropertyName("archive_root")] public string ArchiveRoot { get; set; } = "";
+    [JsonPropertyName("chunks")] public List<PortableZipChunk> Chunks { get; set; } = new();
+}
+
+public sealed class PortableZipChunk
+{
+    [JsonPropertyName("name")] public string Name { get; set; } = "";
+    [JsonPropertyName("file_start")] public int FileStart { get; set; }
+    [JsonPropertyName("file_count")] public int FileCount { get; set; }
+    [JsonPropertyName("uncompressed_bytes")] public long UncompressedBytes { get; set; }
 }
 
 public sealed class PackageFile

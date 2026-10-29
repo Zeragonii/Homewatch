@@ -8,6 +8,8 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import zipfile
+import uuid
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from threading import Lock
 
@@ -191,3 +193,125 @@ def scan_package(root: str, folder: str, entrypoint: str, username: str, passwor
         fingerprint_input['deployment_type'] = 'portable'
     manifest['digest'] = hashlib.sha256(json.dumps(fingerprint_input, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
     return manifest
+
+
+# Portable distribution v0.6.5: one-off, uncompressed ZIP chunk generation.
+# The server only builds these during publication. Client machines stream the
+# ZIP entries directly off SMB into the final-drive staging directory.
+PORTABLE_CHUNK_BYTES = 1024 ** 3
+MAX_PORTABLE_CHUNKS = 1024
+ARCHIVE_CACHE_FOLDER = '.homewatch-packages'
+
+
+def _chunk_groups(files, max_bytes=PORTABLE_CHUNK_BYTES):
+    """Split on file boundaries. One exceptionally large file gets its own ZIP64 chunk."""
+    batch, batch_bytes, start = [], 0, 0
+    for index, item in enumerate(files):
+        if batch and batch_bytes + item['size'] > max_bytes:
+            yield start, batch
+            start, batch, batch_bytes = index, [], 0
+        batch.append(item)
+        batch_bytes += item['size']
+    if batch:
+        yield start, batch
+
+
+def build_portable_chunks(root, folder, username, password, manifest, on_progress=None,
+                          chunk_bytes=PORTABLE_CHUNK_BYTES):
+    """Create immutable STORED ZIPs in share-root/.homewatch-packages/<digest>.
+
+    Requires NAS account write access to that cache directory. The original
+    prepared game folder remains unchanged. Chunks can be reused on rescans.
+    """
+    if manifest.get('deployment_type') != 'portable':
+        raise ValueError('ZIP chunks may only be built for portable games')
+    digest = manifest.get('digest', '')
+    if not re.fullmatch('[a-f0-9]{64}', digest):
+        raise ValueError('Invalid portable manifest digest')
+    folder = validate_relative(folder)
+    if not folder:
+        raise ValueError('Select a dedicated game subfolder rather than the whole NAS share')
+    if folder.lower().split('\\')[0] == ARCHIVE_CACHE_FOLDER:
+        raise ValueError('Do not publish the HomeWatch package cache as a game')
+    groups = list(_chunk_groups(manifest['files'], chunk_bytes))
+    if len(groups) > MAX_PORTABLE_CHUNKS:
+        raise ValueError('Too many ZIP chunks for the portable package')
+    connect(root, username, password)
+    cache = resolve(root, ARCHIVE_CACHE_FOLDER)
+    target_rel = ARCHIVE_CACHE_FOLDER + '\\' + digest
+    target = resolve(root, target_rel)
+    chunks = []
+    for i, (start, group) in enumerate(groups):
+        chunks.append({'name': f'part-{i+1:04d}.zip', 'file_start': start,
+                       'file_count': len(group), 'uncompressed_bytes': sum(f['size'] for f in group)})
+    ready = {'digest': digest, 'chunks': chunks, 'format': 'zip-stored-v1'}
+    # Rescanning an unchanged package should not rebuild many gigabytes.
+    try:
+        with smbclient.open_file(target + '\\ready.json', mode='rb') as handle:
+            cached = json.loads(handle.read().decode('utf-8'))
+        if cached == ready:
+            for chunk in chunks:
+                if smbclient.stat(target + '\\' + chunk['name']).st_size < chunk['uncompressed_bytes']:
+                    raise ValueError('Cached ZIP is incomplete; remove the stale cache directory')
+            return {'transport': 'zip-chunks-v1', 'archive_root': target, 'chunks': chunks}
+        raise ValueError('Cache digest collision or stale ZIP cache; remove the stale cache directory')
+    except FileNotFoundError:
+        pass
+
+    try:
+        smbclient.makedirs(cache, exist_ok=True)
+    except Exception as exc:
+        raise ValueError('Configured NAS credentials require write access to the '
+                         '.homewatch-packages folder at the share root') from exc
+    temporary = resolve(root, ARCHIVE_CACHE_FOLDER + '\\.building-' + uuid.uuid4().hex)
+    try:
+        smbclient.makedirs(temporary, exist_ok=False)
+    except Exception as exc:
+        raise ValueError('Could not create the NAS ZIP cache. Check share write permissions and free space') from exc
+    base_folder = folder + ('\\' if folder else '')
+    total = sum(x['size'] for x in manifest['files'])
+    packed = 0
+    try:
+        for group_index, (start, group) in enumerate(groups):
+            chunk = chunks[group_index]
+            out_path = temporary + '\\' + chunk['name']
+            with smbclient.open_file(out_path, mode='wb') as output:
+                with zipfile.ZipFile(output, mode='w', compression=zipfile.ZIP_STORED,
+                                     allowZip64=True) as archive:
+                    for f in group:
+                        relative = validate_relative(f['path'], allow_empty=False)
+                        source = resolve(root, base_folder + relative)
+                        # Using ZipFile.open(...,'w',force_zip64=True) avoids
+                        # buffering and prevents ZIP32 overflow for large files.
+                        info = zipfile.ZipInfo(relative.replace('\\', '/'))
+                        info.compress_type = zipfile.ZIP_STORED
+                        with smbclient.open_file(source, mode='rb') as source_file, \
+                                archive.open(info, mode='w', force_zip64=True) as zipped:
+                            count = 0
+                            sha = hashlib.sha256()
+                            while block := source_file.read(HASH_CHUNK_BYTES):
+                                count += len(block)
+                                if count > f['size']:
+                                    raise ValueError('Game changed during packaging: ' + relative)
+                                zipped.write(block)
+                                sha.update(block)
+                                packed += len(block)
+                                if on_progress:
+                                    on_progress('Packaging ' + relative, packed, total)
+                            if count != f['size'] or sha.hexdigest() != f['sha256']:
+                                raise ValueError('Game content changed during packaging: ' + relative)
+        with smbclient.open_file(temporary + '\\ready.json', mode='wb') as marker:
+            marker.write(json.dumps(ready, separators=(',', ':'), sort_keys=True).encode('utf-8'))
+        smbclient.rename(temporary, target)
+    except Exception:
+        # Never advertise partial chunks; best-effort cleanup of incomplete
+        # temp writes. The original game source is never modified.
+        for chunk in chunks:
+            try: smbclient.remove(temporary + '\\' + chunk['name'])
+            except Exception: pass
+        try: smbclient.remove(temporary + '\\ready.json')
+        except Exception: pass
+        try: smbclient.rmdir(temporary)
+        except Exception: pass
+        raise
+    return {'transport': 'zip-chunks-v1', 'archive_root': target, 'chunks': chunks}

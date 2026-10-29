@@ -6,7 +6,7 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>HomeWatchAgent</AssemblyName>
-    <Version>0.6.4.1</Version>
+    <Version>0.6.5</Version>
     <ApplicationIcon>HomeWatch.ico</ApplicationIcon>
   </PropertyGroup>
   <ItemGroup>
